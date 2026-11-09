@@ -2,6 +2,7 @@
 
 mod fps;
 mod gpu;
+mod pawnio;
 mod pdh;
 mod temps;
 
@@ -33,6 +34,8 @@ pub struct Snapshot {
     pub cpu_mhz: Option<f64>,
     pub cpu_temp: Option<f32>,
     pub cpu_temp_source: &'static str,
+    /// Processeur Intel ou Ryzen sans PawnIO : l'installer donnerait la température CPU.
+    pub pawnio_missing: bool,
     pub ram_used: u64,
     pub ram_total: u64,
     pub swap_used: u64,
@@ -295,9 +298,10 @@ impl Collector {
         s.disk_write = self.counter("write");
         s.disk_active = self.counter("idle").map(|idle| (100.0 - idle).clamp(0.0, 100.0));
 
-        let (temp, source) = self.temps.cpu();
-        s.cpu_temp = temp;
-        s.cpu_temp_source = source;
+        let temp = self.temps.cpu();
+        s.cpu_temp = temp.celsius;
+        s.cpu_temp_source = temp.source;
+        s.pawnio_missing = temp.pawnio_missing;
 
         s.gpu = self.gpu.read();
 

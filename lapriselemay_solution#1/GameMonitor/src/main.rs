@@ -4,6 +4,7 @@
 mod format;
 mod metrics;
 mod overlay;
+mod placement;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -15,8 +15,8 @@ const VALUE: COLORREF = rgb(240, 240, 240);
 const DIM: COLORREF = rgb(120, 125, 140);
 const GOOD: COLORREF = rgb(90, 220, 120);
 const WARN: COLORREF = rgb(255, 190, 60);
-const BAD: COLORREF = rgb(255, 90, 90);
-const ACCENT: COLORREF = rgb(80, 200, 255);
+pub const BAD: COLORREF = rgb(255, 90, 90);
+pub const ACCENT: COLORREF = rgb(80, 200, 255);
 
 pub struct Line {
     pub label: String,
@@ -92,6 +92,16 @@ pub fn hotkey_warning(keys: &str) -> Line {
     Line::new("").add(format!("Raccourci indisponible : Ctrl+Maj+{keys}"), WARN)
 }
 
+/// Overlay déverrouillé, en tête : comment le reverrouiller. La croix de fermeture se dessine à droite.
+pub fn unlocked_header() -> Line {
+    Line::new("").add("Ctrl+Maj+F11 : verrouiller", ACCENT)
+}
+
+/// Overlay déverrouillé, en bas : ce qui se fait à la souris.
+pub fn unlocked_footer() -> Line {
+    Line::new("").add("Glisser : déplacer · double-clic : détails", ACCENT)
+}
+
 /// Ligne d'avertissement quand la collecte ne publie plus de mesure (voir [`Freshness`]).
 fn frozen_warning(age: Duration) -> Line {
     Line::new("").add(format!("Mesures figées depuis {}", duration(age)), WARN)
@@ -138,6 +148,7 @@ impl Freshness {
 }
 
 /// Lignes de l'overlay pour la mesure `s`. `frozen` : son âge, si elle est figée (voir [`Freshness`]).
+/// `hint` : avec le rappel des raccourcis.
 pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint: bool) -> Vec<Line> {
     let mut lines = Vec::new();
     if s.taken.is_none() {
@@ -170,6 +181,11 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
         cpu = cpu.add(format!("{} GHz", dec(mhz / 1000.0, 2)), VALUE);
     }
     cpu = match s.cpu_temp {
+        // Toujours avec sa source : PawnIO et LHM lisent la sonde du processeur, l'ACPI un capteur
+        // de la carte mère, moins fiable.
+        Some(t) if !s.cpu_temp_source.is_empty() => {
+            cpu.add(format!("{t:.0} °C"), temp_color(t)).add(s.cpu_temp_source, DIM)
+        }
         Some(t) => cpu.add(format!("{t:.0} °C"), temp_color(t)),
         None => cpu.add("temp. n/d", DIM),
     };
@@ -234,12 +250,10 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
     );
 
     if detailed {
-        // La zone ACPI est un capteur de carte mère, pas celui du CPU : on dit d'où vient la mesure.
-        let cpu = match s.cpu_temp_source {
-            "" => s.cpu_name.clone(),
-            source => format!("{} · temp. {source}", s.cpu_name),
-        };
-        lines.push(Line::new("").add(cpu, DIM));
+        lines.push(Line::new("").add(s.cpu_name.clone(), DIM));
+        if s.cpu_temp.is_none() && s.pawnio_missing {
+            lines.push(Line::new("").add("Temp. CPU : installer PawnIO (pawnio.eu)", DIM));
+        }
         lines.push(Line::new("").add(g.name.clone(), DIM));
         if let Some(m) = g.mem_clock_mhz {
             lines.push(Line::new("GPU mém.").add(format!("{m} MHz"), VALUE));
@@ -280,8 +294,8 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
         );
     }
 
-    if hint || detailed {
-        lines.push(Line::new("").add("Ctrl+Maj+F9 détails · F10 masquer · F11 coin · F12 quitter", DIM));
+    if hint {
+        lines.push(Line::new("").add("Ctrl+Maj+F10 masquer · F11 déplacer", DIM));
     }
 
     // Plus de nouvelle mesure alors que l'overlay est affiché : la collecte est bloquée.
@@ -356,20 +370,37 @@ mod tests {
         s.cpu_mhz = Some(4_650.0);
         assert_eq!(text(find(&fresh(&s, false, false), "CPU")), "42 %  4,65 GHz  temp. n/d");
 
+        // La source est affichée à côté de la température, en mode compact comme détaillé.
         s.cpu_temp = Some(61.6);
+        s.cpu_temp_source = "PawnIO";
+        assert_eq!(text(find(&fresh(&s, false, false), "CPU")), "42 %  4,65 GHz  62 °C  PawnIO");
         s.cpu_temp_source = "ACPI";
         let lines = fresh(&s, true, false);
-        assert_eq!(text(find(&lines, "CPU")), "42 %  4,65 GHz  62 °C");
-        assert!(lines.iter().any(|l| text(l) == "Intel Core i5-14400F · temp. ACPI"));
+        assert_eq!(text(find(&lines, "CPU")), "42 %  4,65 GHz  62 °C  ACPI");
+        assert!(lines.iter().any(|l| text(l) == "Intel Core i5-14400F"));
+    }
+
+    #[test]
+    fn suggests_installing_pawnio() {
+        // Processeur Intel sans PawnIO, et aucune température : le mode détaillé dit quoi faire.
+        let s = Snapshot { pawnio_missing: true, ..measured() };
+        let hint = |lines: &[Line]| lines.iter().any(|l| text(l).contains("installer PawnIO"));
+        assert!(hint(&fresh(&s, true, false)));
+        assert!(!hint(&fresh(&s, false, false)));
+        // Une température lue autrement (LibreHardwareMonitor, ACPI) suffit.
+        let s = Snapshot { cpu_temp: Some(50.0), cpu_temp_source: "LHM", ..s };
+        assert!(!hint(&fresh(&s, true, false)));
     }
 
     #[test]
     fn hint_and_hotkey_warning() {
         let s = measured();
-        let hint = |lines: &[Line]| lines.iter().any(|l| text(l).starts_with("Ctrl+Maj+F9"));
+        let hint = |lines: &[Line]| lines.iter().any(|l| text(l) == "Ctrl+Maj+F10 masquer · F11 déplacer");
         assert!(hint(&fresh(&s, false, true)));
         assert!(!hint(&fresh(&s, false, false)));
-        assert_eq!(text(&hotkey_warning("F9 F12")), "Raccourci indisponible : Ctrl+Maj+F9 F12");
+        // En mode détaillé aussi, c'est l'overlay qui décide d'afficher le rappel ou non.
+        assert!(!hint(&fresh(&s, true, false)));
+        assert_eq!(text(&hotkey_warning("F11")), "Raccourci indisponible : Ctrl+Maj+F11");
     }
 
     #[test]

@@ -1,8 +1,9 @@
-//! Température CPU via WMI, lue dans un thread à part.
+//! Température CPU, lue dans un thread à part.
 //!
 //! Windows n'expose pas la température des cœurs sans pilote noyau. On essaie donc :
-//! 1. LibreHardwareMonitor s'il tourne (lecture précise, il publie ses capteurs dans WMI) ;
-//! 2. la zone thermique ACPI de la carte mère (admin requis, pas disponible partout).
+//! 1. le pilote PawnIO s'il est installé (processeurs Intel et AMD Ryzen) : lecture précise et directe ;
+//! 2. LibreHardwareMonitor s'il tourne (lecture précise, il publie ses capteurs dans WMI) ;
+//! 3. la zone thermique ACPI de la carte mère (admin requis, pas disponible partout).
 //!
 //! Une requête WMI attend la réponse du fournisseur sans limite de temps : si celui de
 //! LibreHardwareMonitor ne répond plus, elle ne revient pas. Les requêtes se font donc dans
@@ -15,6 +16,8 @@ use std::time::{Duration, Instant};
 
 use wmi::{Variant, WMIConnection};
 
+use super::pawnio::{PawnIo, Reading as PawnReading, Unavailable};
+
 type Row = HashMap<String, Variant>;
 
 const RETRY: Duration = Duration::from_secs(30);
@@ -22,12 +25,23 @@ const RETRY: Duration = Duration::from_secs(30);
 const WAIT: Duration = Duration::from_millis(250);
 /// Au-delà de cet âge, une température que WMI tarde à renouveler n'est plus affichée.
 const MAX_AGE: Duration = Duration::from_secs(5);
+/// Mesure PawnIO manquée (bus PCI occupé par un autre outil…) : la précédente reste affichée jusque-là.
+const SKIPPED_GRACE: Duration = Duration::from_secs(3);
 
-/// Température (°C) et source, à l'heure de la lecture.
+/// Température CPU, et d'où elle vient.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CpuTemp {
+    pub celsius: Option<f32>,
+    /// « PawnIO », « LHM » ou « ACPI » ; vide sans température.
+    pub source: &'static str,
+    /// Processeur Intel ou Ryzen sans PawnIO : l'installer donnerait sa température.
+    pub pawnio_missing: bool,
+}
+
+/// Lecture, à son heure.
 #[derive(Clone, Copy)]
 struct Reading {
-    celsius: Option<f32>,
-    source: &'static str,
+    temp: CpuTemp,
     at: Instant,
 }
 
@@ -54,7 +68,7 @@ impl Temps {
     fn start<F, R>(reader: F) -> Self
     where
         F: FnOnce() -> R + Send + 'static,
-        R: FnMut() -> (Option<f32>, &'static str),
+        R: FnMut() -> CpuTemp,
     {
         let (requests, incoming) = mpsc::channel();
         let (outgoing, readings) = mpsc::channel();
@@ -63,8 +77,8 @@ impl Temps {
         let _ = std::thread::Builder::new().name("temperature".into()).spawn(move || {
             let mut read = reader();
             while incoming.recv().is_ok() {
-                let (celsius, source) = read();
-                if outgoing.send(Reading { celsius, source, at: Instant::now() }).is_err() {
+                let temp = read();
+                if outgoing.send(Reading { temp, at: Instant::now() }).is_err() {
                     break;
                 }
             }
@@ -72,9 +86,9 @@ impl Temps {
         Self { requests, readings, pending: false, last: None }
     }
 
-    /// Renvoie (température °C, source). Si le thread de lecture tarde, la dernière valeur connue,
-    /// tant qu'elle n'a pas plus de [`MAX_AGE`].
-    pub fn cpu(&mut self) -> (Option<f32>, &'static str) {
+    /// Dernière température lue. Si le thread de lecture tarde, la précédente, tant qu'elle n'a pas
+    /// plus de [`MAX_AGE`].
+    pub fn cpu(&mut self) -> CpuTemp {
         let reading = if self.pending {
             // Toujours pas de réponse à la demande précédente : le thread est lent ou bloqué.
             // On ne l'attend plus, et on ne lui envoie rien d'autre en attendant.
@@ -92,16 +106,22 @@ impl Temps {
         self.current(Instant::now())
     }
 
-    fn current(&self, now: Instant) -> (Option<f32>, &'static str) {
+    fn current(&self, now: Instant) -> CpuTemp {
         match self.last {
-            Some(r) if now.saturating_duration_since(r.at) <= MAX_AGE => (r.celsius, r.source),
-            _ => (None, ""),
+            Some(r) if now.saturating_duration_since(r.at) <= MAX_AGE => r.temp,
+            _ => CpuTemp::default(),
         }
     }
 }
 
-/// Côté thread de lecture : les connexions WMI aux deux sources.
+/// Côté thread de lecture : le pilote PawnIO et, seulement quand il ne sert pas, les connexions WMI
+/// aux deux autres sources.
 struct Sources {
+    pawnio: Option<PawnIo>,
+    /// Dernière température lue par PawnIO, et quand.
+    last_pawnio: Option<(f32, Instant)>,
+    /// PawnIO n'est pas installé, sur un processeur qu'il permettrait de lire.
+    pawnio_missing: bool,
     lhm: Option<WMIConnection>,
     acpi: Option<WMIConnection>,
     next_retry: Instant,
@@ -126,35 +146,78 @@ fn as_str(v: Option<&Variant>) -> &str {
 
 impl Sources {
     fn new() -> Self {
-        let mut s = Self { lhm: None, acpi: None, next_retry: Instant::now() };
+        let mut s = Self {
+            pawnio: None,
+            last_pawnio: None,
+            pawnio_missing: false,
+            lhm: None,
+            acpi: None,
+            next_retry: Instant::now(),
+        };
         s.connect();
         s
     }
 
     fn connect(&mut self) {
-        if self.lhm.is_none() {
-            self.lhm = WMIConnection::with_namespace_path(r"ROOT\LibreHardwareMonitor").ok();
+        if self.pawnio.is_none() {
+            match PawnIo::open() {
+                Ok(p) => {
+                    self.pawnio = Some(p);
+                    self.pawnio_missing = false;
+                }
+                Err(why) => self.pawnio_missing = why == Unavailable::Missing,
+            }
         }
-        if self.acpi.is_none() {
-            self.acpi = WMIConnection::with_namespace_path(r"ROOT\WMI").ok();
+        if self.pawnio.is_some() {
+            // PawnIO suffit : ni connexion WMI ni COM tant qu'il répond.
+            self.lhm = None;
+            self.acpi = None;
+        } else {
+            if self.lhm.is_none() {
+                self.lhm = WMIConnection::with_namespace_path(r"ROOT\LibreHardwareMonitor").ok();
+            }
+            if self.acpi.is_none() {
+                self.acpi = WMIConnection::with_namespace_path(r"ROOT\WMI").ok();
+            }
         }
         self.next_retry = Instant::now() + RETRY;
     }
 
-    /// Renvoie (température °C, source).
-    fn cpu(&mut self) -> (Option<f32>, &'static str) {
-        // Réessai périodique même quand l'ACPI répond : LibreHardwareMonitor, plus précis,
-        // a pu être lancé après GameMonitor (ou relancé après avoir été fermé).
-        if (self.lhm.is_none() || self.acpi.is_none()) && Instant::now() >= self.next_retry {
+    fn cpu(&mut self) -> CpuTemp {
+        // Réessai périodique tant que PawnIO ne sert pas, même quand une autre source répond :
+        // PawnIO a pu être installé, ou LibreHardwareMonitor lancé, après GameMonitor.
+        if self.pawnio.is_none() && Instant::now() >= self.next_retry {
             self.connect();
         }
-        if let Some(t) = self.read_lhm() {
-            return (Some(t), "LHM");
+        let (celsius, source) = if let Some(t) = self.read_pawnio() {
+            (Some(t), "PawnIO")
+        } else if let Some(t) = self.read_lhm() {
+            (Some(t), "LHM")
+        } else if let Some(t) = self.read_acpi() {
+            (Some(t), "ACPI")
+        } else {
+            (None, "")
+        };
+        CpuTemp { celsius, source, pawnio_missing: self.pawnio_missing }
+    }
+
+    fn read_pawnio(&mut self) -> Option<f32> {
+        match self.pawnio.as_ref()?.read() {
+            PawnReading::Celsius(t) => {
+                self.last_pawnio = Some((t, Instant::now()));
+                Some(t)
+            }
+            PawnReading::Skipped => {
+                self.last_pawnio.filter(|(_, at)| at.elapsed() < SKIPPED_GRACE).map(|(t, _)| t)
+            }
+            PawnReading::Failed => {
+                // Pilote arrêté ou désinstallé entre-temps : dès la mesure suivante, on le rouvre ou,
+                // à défaut, on se connecte aux autres sources.
+                self.pawnio = None;
+                self.next_retry = Instant::now();
+                None
+            }
         }
-        if let Some(t) = self.read_acpi() {
-            return (Some(t), "ACPI");
-        }
-        (None, "")
     }
 
     fn read_lhm(&mut self) -> Option<f32> {
@@ -208,8 +271,12 @@ impl Sources {
 mod tests {
     use super::*;
 
+    fn reading(celsius: f32, source: &'static str) -> CpuTemp {
+        CpuTemp { celsius: Some(celsius), source, pawnio_missing: false }
+    }
+
     /// Appelle `cpu()` comme la collecte, une fois toutes les 10 ms, jusqu'à obtenir `expected`.
-    fn wait_for(temps: &mut Temps, expected: (Option<f32>, &str)) {
+    fn wait_for(temps: &mut Temps, expected: CpuTemp) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while temps.cpu() != expected {
             assert!(Instant::now() < deadline, "toujours pas de lecture {expected:?}");
@@ -224,31 +291,31 @@ mod tests {
         let mut temps = Temps::start(move || {
             move || {
                 let _ = blocked.recv();
-                (Some(55.0), "LHM")
+                reading(55.0, "LHM")
             }
         });
 
         // La collecte n'attend la réponse qu'une fois, et pas plus de WAIT…
         let start = Instant::now();
-        assert_eq!(temps.cpu(), (None, ""));
+        assert_eq!(temps.cpu(), CpuTemp::default());
         assert!(start.elapsed() < 4 * WAIT, "{:?}", start.elapsed());
         // … puis plus du tout tant que le thread est bloqué.
         let start = Instant::now();
-        assert_eq!(temps.cpu(), (None, ""));
+        assert_eq!(temps.cpu(), CpuTemp::default());
         assert!(start.elapsed() < WAIT, "{:?}", start.elapsed());
 
         // La réponse tardive est reprise dès qu'elle arrive.
         unblock.send(()).unwrap();
-        wait_for(&mut temps, (Some(55.0), "LHM"));
+        wait_for(&mut temps, reading(55.0, "LHM"));
     }
 
     #[test]
     fn the_last_reading_is_kept_up_to_max_age() {
-        let mut temps = Temps::start(|| || (Some(61.0), "ACPI"));
-        wait_for(&mut temps, (Some(61.0), "ACPI"));
+        let mut temps = Temps::start(|| || reading(61.0, "ACPI"));
+        wait_for(&mut temps, reading(61.0, "ACPI"));
         let at = temps.last.unwrap().at;
-        assert_eq!(temps.current(at + MAX_AGE), (Some(61.0), "ACPI"));
+        assert_eq!(temps.current(at + MAX_AGE), reading(61.0, "ACPI"));
         // Au-delà, une température qui ne se renouvelle plus n'est plus affichée.
-        assert_eq!(temps.current(at + MAX_AGE + Duration::from_millis(1)), (None, ""));
+        assert_eq!(temps.current(at + MAX_AGE + Duration::from_millis(1)), CpuTemp::default());
     }
 }
