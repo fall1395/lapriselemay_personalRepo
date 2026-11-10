@@ -110,10 +110,18 @@ Pour tester sans la demande d'administrateur : `cargo run` (debug), ou définir 
 `cargo build --release`.
 
 Tests : `cargo test` (mise en forme et mesures figées, calcul des FPS, charge GPU, température
-qui ne répond plus, placement et déplacement de l'overlay, place retenue). Le CI lance aussi
-`ci/smoke-test.ps1` sur un vrai Windows : démarrage, session ETW, déplacement à la souris et place
-retrouvée au lancement suivant, mode détaillé, instance unique, pause quand l'overlay est masqué,
-et fermeture par la croix sans session ETW laissée ouverte.
+qui ne répond plus, placement et déplacement de l'overlay, place retenue).
+
+Test de fumée : `ci/smoke-test.ps1`, à lancer à la main sur un vrai Windows, dans un PowerShell
+ouvert en administrateur. Il ferme les GameMonitor déjà lancés.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ci\smoke-test.ps1 -Exe target\release\GameMonitor.exe
+```
+
+Il vérifie le démarrage, la session ETW, le déplacement à la souris et la place retrouvée au lancement
+suivant, le mode détaillé, l'instance unique, la pause quand l'overlay est masqué, et la fermeture par
+la croix sans session ETW laissée ouverte.
 
 ## Structure
 
@@ -133,5 +141,5 @@ src/
 pawnio/
   *.bin            modules officiels de PawnIO, intégrés à l'exe (LGPL 2.1, voir pawnio/LISEZMOI.md)
 ci/
-  smoke-test.ps1   test de fumée Windows (utilisé par le CI)
+  smoke-test.ps1   test de fumée Windows (à lancer en administrateur)
 ```

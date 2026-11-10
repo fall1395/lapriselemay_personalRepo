@@ -1,9 +1,9 @@
-# Test de fumée de GameMonitor sur un vrai Windows (utilisé par le CI, droits administrateur requis) :
+# Test de fumée de GameMonitor sur un vrai Windows (droits administrateur requis) :
 # démarrage, session ETW des FPS, place par défaut, déverrouillage et déplacement à la souris (place
 # retrouvée au lancement suivant), mode détaillé, instance unique, pause quand l'overlay est masqué,
 # fermeture par la croix sans session ETW laissée ouverte.
 #
-#   pwsh -File ci/smoke-test.ps1 -Exe target/release/GameMonitor.exe [-Screenshot dossier]
+#   powershell -ExecutionPolicy Bypass -File ci\smoke-test.ps1 -Exe target\release\GameMonitor.exe [-Screenshot dossier]
 #
 # Attention : ferme les GameMonitor déjà lancés. La place enregistrée de l'overlay est mise de côté
 # pendant le test, puis remise.
@@ -14,7 +14,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Session = 'GameMonitorFPS'
+# Session ETW de GameMonitor : une par session Windows, comme celle de ce script.
+$Session = "GameMonitorFPS-$((Get-Process -Id $PID).SessionId)"
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Fail([string] $message) {

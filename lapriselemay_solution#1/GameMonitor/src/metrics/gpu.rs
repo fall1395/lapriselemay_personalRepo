@@ -2,10 +2,16 @@
 //! sinon compteurs Windows génériques (marche aussi pour Intel et AMD) et nom donné par DXGI.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::PathBuf;
 
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1};
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+use windows::core::w;
 
 use super::pdh::{Counter, Pdh};
 
@@ -44,11 +50,32 @@ fn adapter_name() -> Option<String> {
         })
 }
 
+/// NVML, installée par le pilote NVIDIA dans System32, et chargée de là seulement, ses dépendances aussi.
+///
+/// Par son seul nom (ce que fait `Nvml::init`), Windows chercherait d'abord `nvml.dll` dans le dossier
+/// de l'exe : une DLL déposée à côté de GameMonitor (dans Téléchargements, par exemple) s'y exécuterait
+/// avec ses droits administrateur. Seul un administrateur peut écrire dans System32.
+fn load_nvml() -> Option<Nvml> {
+    let module = unsafe { LoadLibraryExW(w!("nvml.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
+    // nvml-wrapper la charge à son tour, par son chemin complet : Windows lui rend celle qui est
+    // déjà chargée, sans rien chercher d'autre. Elle reste chargée tant qu'il s'en sert.
+    let nvml = module_path(module).and_then(|path| Nvml::builder().lib_path(path.as_os_str()).init().ok());
+    unsafe {
+        let _ = FreeLibrary(module);
+    }
+    nvml
+}
+
+/// Chemin complet d'un module chargé dans le processus.
+fn module_path(module: HMODULE) -> Option<PathBuf> {
+    let mut buffer = [0u16; 1024];
+    let len = unsafe { GetModuleFileNameW(Some(module), &mut buffer) } as usize;
+    (len > 0 && len < buffer.len()).then(|| PathBuf::from(OsString::from_wide(&buffer[..len])))
+}
+
 impl Gpu {
     pub fn new(pdh: Option<&Pdh>) -> Self {
-        let nvml = Nvml::init()
-            .ok()
-            .filter(|n| n.device_count().map(|c| c > 0).unwrap_or(false));
+        let nvml = load_nvml().filter(|n| n.device_count().map(|c| c > 0).unwrap_or(false));
         let name = nvml
             .as_ref()
             .and_then(|n| n.device_by_index(0).ok()?.name().ok())
@@ -128,5 +155,18 @@ mod tests {
         let values = [instance(10, "0x1_phys_0_eng_0", 80.0), instance(20, "0x1_phys_0_eng_0", 40.0)];
         assert_eq!(busiest_engine(&values), 100.0);
         assert_eq!(busiest_engine(&[]), 0.0);
+    }
+
+    #[test]
+    fn nvml_comes_from_system32_only() {
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        // Sans pilote NVIDIA (PC à carte Intel ou AMD), rien n'est chargé ; avec, c'est celle de System32.
+        let _nvml = load_nvml();
+        if let Ok(module) = unsafe { GetModuleHandleW(w!("nvml.dll")) } {
+            let path = module_path(module).unwrap();
+            let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+            let folder = path.parent().unwrap().as_os_str();
+            assert!(folder.eq_ignore_ascii_case(system32.as_os_str()), "{}", path.display());
+        }
     }
 }
