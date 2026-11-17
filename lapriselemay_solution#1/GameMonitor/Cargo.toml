@@ -1,8 +1,12 @@
 [package]
 name = "game_monitor"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+rust-version = "1.75"
 description = "Overlay de monitoring natif et léger pour PC de jeu Windows"
+license = "MIT OR Apache-2.0"
+authors = ["Félix Lemay"]
+repository = "https://github.com/lemayfelix/GameMonitor"
 
 [[bin]]
 name = "GameMonitor"
@@ -11,9 +15,11 @@ path = "src/main.rs"
 [dependencies]
 ferrisetw = "1.2.0"
 nvml-wrapper = "0.13.0"
+log = "0.4"
 # Sans "multithread" : évite le pool de threads rayon, inutile ici.
 sysinfo = { version = "0.40.1", default-features = false, features = ["system", "network", "disk"] }
 wmi = "0.18.4"
+env_logger = "0.10"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",

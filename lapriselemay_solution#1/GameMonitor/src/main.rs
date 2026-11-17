@@ -27,6 +27,15 @@ fn already_running() -> bool {
 }
 
 fn main() {
+    // Initialisation du logger
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .format_timestamp(None)
+        .init();
+    
+    log::info!("Démarrage GameMonitor v{}", env!("CARGO_PKG_VERSION"));
+    log::debug!("Configuration : Rust edition 2021");
+    
     // Les DLL chargées en cours de route (par GameMonitor, ou par Windows et les pilotes pour lui)
     // viennent de System32 seulement, jamais du dossier de l'exe : une DLL déposée à côté de
     // GameMonitor y tournerait avec ses droits administrateur. Les DLL liées à l'exe, chargées
@@ -37,14 +46,17 @@ fn main() {
     // Un second GameMonitor fermerait la session ETW du premier et ne pourrait pas
     // enregistrer les raccourcis : il demande plutôt au premier de se réafficher.
     if already_running() {
+        log::info!("Instance déjà en cours d'exécution, affichage de l'overlay existant");
         overlay::show_existing();
         return;
     }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    log::info!("Initialisation de l'overlay et de la collecte des métriques");
     let shared = Arc::new(Mutex::new(metrics::Snapshot::default()));
     let worker = metrics::spawn(shared.clone());
     overlay::run(shared, worker.control());
     worker.stop(Duration::from_secs(2));
+    log::info!("Arrêt propre de GameMonitor");
 }

@@ -380,10 +380,10 @@ fn paint(hwnd: HWND) {
         // BeginPaint et EndPaint même sans état à dessiner : sans eux, Windows renverrait WM_PAINT
         // sans fin.
         STATE.with(|cell| {
-            if let Ok(guard) = cell.try_borrow()
-                && let Some(st) = guard.as_ref()
-            {
-                draw(hdc, st);
+            if let Ok(guard) = cell.try_borrow() {
+                if let Some(st) = guard.as_ref() {
+                    draw(hdc, st);
+                }
             }
         });
         let _ = EndPaint(hwnd, &ps);

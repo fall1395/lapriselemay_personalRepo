@@ -6,6 +6,8 @@ mod pawnio;
 mod pdh;
 mod temps;
 
+use log::{debug, info, warn};
+
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -125,18 +127,24 @@ fn publish(shared: &SharedSnapshot, snap: Snapshot) {
 }
 
 fn run(shared: &SharedSnapshot, commands: &Receiver<Command>) {
+    info!("Thread de collecte démarré");
     let mut collector = Collector::new();
     let mut paused = false;
     let mut next = Instant::now() + PERIOD;
     loop {
         let command = if paused {
+            debug!("Collecte en pause, attente de commande...");
             // En pause, le thread dort jusqu'à la prochaine commande : aucune consommation.
             commands.recv().unwrap_or(Command::Quit)
         } else {
             match commands.recv_timeout(next.saturating_duration_since(Instant::now())) {
                 Ok(command) => command,
-                Err(RecvTimeoutError::Disconnected) => Command::Quit,
+                Err(RecvTimeoutError::Disconnected) => {
+                    info!("Canal de commandes déconnecté, arrêt de la collecte");
+                    Command::Quit
+                }
                 Err(RecvTimeoutError::Timeout) => {
+                    debug!("Collecte des métriques...");
                     publish(shared, collector.collect());
                     // Cadence régulière, mais au moins une demi-période entre deux mesures
                     // si l'une a pris du retard (les débits seraient sinon calculés sur un instant).
@@ -146,14 +154,19 @@ fn run(shared: &SharedSnapshot, commands: &Receiver<Command>) {
             }
         };
         match command {
-            Command::Quit => break,
+            Command::Quit => {
+                info!("Arrêt de la collecte");
+                break;
+            }
             Command::Pause if !paused => {
+                info!("Pause de la collecte");
                 paused = true;
                 collector.pause();
                 // À la réapparition, on n'affichera pas des valeurs d'avant la pause.
                 publish(shared, Snapshot::default());
             }
             Command::Resume if paused => {
+                info!("Reprise de la collecte");
                 paused = false;
                 collector.resume();
                 next = Instant::now() + PERIOD;
@@ -161,6 +174,7 @@ fn run(shared: &SharedSnapshot, commands: &Receiver<Command>) {
             Command::Pause | Command::Resume => {}
         }
     }
+    info!("Thread de collecte arrêté");
     // `collector` est libéré ici : session ETW fermée, requête PDH et NVML aussi.
 }
 
@@ -198,6 +212,7 @@ fn foreground_pid() -> u32 {
 
 impl Collector {
     fn new() -> Self {
+        info!("Initialisation du collecteur de métriques");
         let mut sys = System::new().expect("sysinfo");
         sys.refresh_cpu_all();
         let cpu_name = sys
@@ -205,17 +220,26 @@ impl Collector {
             .first()
             .map(|c| c.brand().trim().to_string())
             .unwrap_or_default();
+        info!("CPU détecté : {}", cpu_name);
 
         let pdh = pdh::Pdh::new();
         let mut counters = HashMap::new();
         if let Some(p) = &pdh {
+            info!("PDH initialisé, ajout des compteurs...");
             for (key, path) in PDH_COUNTERS {
                 if let Some(c) = p.add(path) {
                     counters.insert(*key, c);
+                    debug!("Compteur PDH ajouté : {}", path);
+                } else {
+                    warn!("Échec de l'ajout du compteur PDH : {}", path);
                 }
             }
+        } else {
+            warn!("PDH non disponible, certaines métriques seront manquantes");
         }
+        
         let gpu = gpu::Gpu::new(pdh.as_ref());
+        info!("GPU : {}", gpu.read().name);
 
         let mut collector = Self {
             sys,
@@ -231,6 +255,7 @@ impl Collector {
             self_pid: Pid::from_u32(std::process::id()),
             cpu_name,
         };
+        info!("Collecteur initialisé, FPS disponible : {}", collector.fps.available());
         collector.prime();
         collector
     }
