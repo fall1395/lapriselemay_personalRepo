@@ -123,6 +123,82 @@ Il vérifie le démarrage, la session ETW, le déplacement à la souris et la pl
 suivant, le mode détaillé, l'instance unique, la pause quand l'overlay est masqué, et la fermeture par
 la croix sans session ETW laissée ouverte.
 
+### Journalisation (Logging)
+
+GameMonitor utilise `env_logger` pour afficher des informations de diagnostic. Pour activer le logging :
+
+- **Niveau Info** (démarrage, arrêts, événements importants) :
+  ```bash
+  RUST_LOG=info GameMonitor.exe
+  ```
+- **Niveau Debug** (détails de la collecte, compteurs PDH, initialisation) :
+  ```bash
+  RUST_LOG=debug GameMonitor.exe
+  ```
+- **Niveau Trace** (toutes les informations, y compris les mesures détaillées) :
+  ```bash
+  RUST_LOG=trace GameMonitor.exe
+  ```
+
+Les logs sont affichés sur la sortie standard (console). En mode release sans console, les logs
+peuvent être redirigés vers un fichier :
+
+```cmd
+RUST_LOG=debug GameMonitor.exe > gamemonitor.log 2>&1
+```
+
+## Développement
+
+### Prérequis
+
+- Rust 1.75+ (chaîne MSVC)
+- Visual Studio avec les outils C++ (pour les dépendances natives)
+- Windows 10 1607 ou supérieur (pour `/DEPENDENTLOADFLAG`)
+
+### Intégration Continue
+
+Un workflow GitHub Actions est configuré dans `.github/workflows/ci.yml` et s'exécute
+automatiquement sur chaque push et pull request. Il vérifie :
+
+- Le formatage du code (`cargo fmt`)
+- L'absence d'avertissements avec Clippy (`cargo clippy -D warnings`)
+- La compilation en mode debug et release
+- L'exécution des tests unitaires
+
+Pour exécuter ces vérifications en local :
+
+```bash
+# Formatage
+cargo fmt --all -- --check
+
+# Clippy
+cargo clippy --all-targets --all-features -D warnings
+
+# Tests
+cargo test
+```
+
+### Vérification des modules PawnIO
+
+Les modules PawnIO intégrés (`pawnio/IntelMSR.bin` et `pawnio/AMDFamily17.bin`) ont des
+signatures SHA-256 vérifiées. Pour vérifier leur intégrité après une mise à jour :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ci\verify-pawnio.ps1
+```
+Ce script compare les signatures des fichiers locaux avec les signatures officielles
+des modules PawnIO.Modules 0.2.11.
+
+### Mise à jour des dépendances
+
+```bash
+cargo update
+cargo build --release
+cargo test
+```
+
+Vérifiez que tous les tests passent avant de commiter les changements.
+
 ## Structure
 
 ```
@@ -142,4 +218,40 @@ pawnio/
   *.bin            modules officiels de PawnIO, intégrés à l'exe (LGPL 2.1, voir pawnio/LISEZMOI.md)
 ci/
   smoke-test.ps1   test de fumée Windows (à lancer en administrateur)
+  verify-pawnio.ps1 vérification des signatures SHA-256 des modules PawnIO
+.github/
+  workflows/
+    ci.yml          workflow GitHub Actions pour l'intégration continue
 ```
+
+## Contribution
+
+Les contributions sont les bienvenues ! Voici comment contribuer :
+
+1. **Fork** le dépôt et créez une branche pour votre fonctionnalité (`git checkout -b feature/nom-de-la-fonctionnalité`)
+2. **Commitez** vos changements (`git commit -m 'Ajout de la fonctionnalité'`)
+3. **Poussez** vers la branche (`git push origin feature/nom-de-la-fonctionnalité`)
+4. **Ouvrez** une Pull Request
+
+### Bonnes pratiques
+
+- Respectez le style de code existant (Rustfmt est appliqué via CI)
+- Ajoutez des tests pour les nouvelles fonctionnalités
+- Documentez les changements dans le README si nécessaire
+- Utilisez des commits atomiques (une fonctionnalité = un commit)
+- Vérifiez que `cargo clippy` ne produit pas d'avertissements
+
+### Rapport de bugs
+
+Pour rapporter un bug, veuillez inclure :
+
+- La version de GameMonitor (`GameMonitor.exe --version` ou via le commit)
+- La version de Windows (10/11, build)
+- Les étapes pour reproduire le bug
+- Le comportement attendu vs le comportement actuel
+- Les logs si disponibles (`RUST_LOG=debug GameMonitor.exe > log.txt 2>&1`)
+
+### Architectures supportées
+
+- **Supporté** : Windows 10 1607+, Windows 11, x86_64
+- **Non supporté** : Windows 7/8, ARM64, Linux, macOS
