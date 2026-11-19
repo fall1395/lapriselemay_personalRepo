@@ -117,7 +117,10 @@ pub fn spawn(shared: SharedSnapshot) -> Worker {
         run(&shared, &commands);
         let _ = finished.send(());
     });
-    Worker { control: Control(control), done }
+    Worker {
+        control: Control(control),
+        done,
+    }
 }
 
 fn publish(shared: &SharedSnapshot, snap: Snapshot) {
@@ -194,8 +197,14 @@ struct Collector {
 }
 
 const PDH_COUNTERS: &[(&str, &str)] = &[
-    ("perf", r"\Processor Information(_Total)\% Processor Performance"),
-    ("freq", r"\Processor Information(_Total)\Processor Frequency"),
+    (
+        "perf",
+        r"\Processor Information(_Total)\% Processor Performance",
+    ),
+    (
+        "freq",
+        r"\Processor Information(_Total)\Processor Frequency",
+    ),
     ("read", r"\PhysicalDisk(_Total)\Disk Read Bytes/sec"),
     ("write", r"\PhysicalDisk(_Total)\Disk Write Bytes/sec"),
     ("idle", r"\PhysicalDisk(_Total)\% Idle Time"),
@@ -237,7 +246,7 @@ impl Collector {
         } else {
             warn!("PDH non disponible, certaines métriques seront manquantes");
         }
-        
+
         let gpu = gpu::Gpu::new(pdh.as_ref());
         info!("GPU : {}", gpu.read().name);
 
@@ -255,7 +264,10 @@ impl Collector {
             self_pid: Pid::from_u32(std::process::id()),
             cpu_name,
         };
-        info!("Collecteur initialisé, FPS disponible : {}", collector.fps.available());
+        info!(
+            "Collecteur initialisé, FPS disponible : {}",
+            collector.fps.available()
+        );
         collector.prime();
         collector
     }
@@ -321,7 +333,9 @@ impl Collector {
         }
         s.disk_read = self.counter("read");
         s.disk_write = self.counter("write");
-        s.disk_active = self.counter("idle").map(|idle| (100.0 - idle).clamp(0.0, 100.0));
+        s.disk_active = self
+            .counter("idle")
+            .map(|idle| (100.0 - idle).clamp(0.0, 100.0));
 
         let temp = self.temps.cpu();
         s.cpu_temp = temp.celsius;
@@ -352,7 +366,11 @@ impl Collector {
             s.drives = disks
                 .iter()
                 .map(|d| Drive {
-                    mount: d.mount_point().to_string_lossy().trim_end_matches('\\').to_string(),
+                    mount: d
+                        .mount_point()
+                        .to_string_lossy()
+                        .trim_end_matches('\\')
+                        .to_string(),
                     free: d.available_space(),
                     total: d.total_space(),
                 })
@@ -370,7 +388,11 @@ impl Collector {
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
         if let Some(p) = self.sys.process(fg_pid) {
-            s.foreground = p.name().to_string_lossy().trim_end_matches(".exe").to_string();
+            s.foreground = p
+                .name()
+                .to_string_lossy()
+                .trim_end_matches(".exe")
+                .to_string();
         }
         if let Some(p) = self.sys.process(self.self_pid) {
             s.self_cpu = p.cpu_usage() / self.sys.cpus().len().max(1) as f32;

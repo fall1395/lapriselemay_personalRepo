@@ -1,0 +1,62 @@
+name: GameMonitor CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: 'lapriselemay_solution#1/GameMonitor'
+
+jobs:
+  build:
+    name: Windows (Rust ${{ matrix.toolchain }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.95.0', stable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: gamemonitor-${{ runner.os }}-${{ matrix.toolchain }}-${{ hashFiles('lapriselemay_solution#1/GameMonitor/Cargo.lock') }}
+
+      - name: Check formatting
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Verify PawnIO modules
+        run: ./ci/verify-pawnio.ps1
+
+      - name: Build (debug)
+        run: cargo build --locked
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build (release)
+        run: cargo build --locked --release

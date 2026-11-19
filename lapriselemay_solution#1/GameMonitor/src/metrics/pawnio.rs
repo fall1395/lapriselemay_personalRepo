@@ -10,9 +10,10 @@
 use std::arch::x86_64::__cpuid;
 use std::ffi::c_void;
 
+use windows::core::w;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL,
-    LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0,
+    CloseHandle, LocalFree, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, GENERIC_READ,
+    GENERIC_WRITE, HANDLE, HLOCAL, WAIT_ABANDONED, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -21,12 +22,11 @@ use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Threading::{
-    CreateMutexW, MUTEX_MODIFY_STATE, OpenMutexW, ReleaseMutex, SYNCHRONIZATION_SYNCHRONIZE,
-    WaitForSingleObject,
+    CreateMutexW, OpenMutexW, ReleaseMutex, WaitForSingleObject, MUTEX_MODIFY_STATE,
+    SYNCHRONIZATION_SYNCHRONIZE,
 };
-use windows::core::w;
+use windows::Win32::System::IO::DeviceIoControl;
 
 /// Modules de PawnIO.Modules 0.2.11, tels que publiés et signés par l'auteur de PawnIO.
 const INTEL_MSR: &[u8] = include_bytes!("../../pawnio/IntelMSR.bin");
@@ -72,8 +72,15 @@ pub enum Reading {
 
 /// Sonde thermique du processeur, lue par PawnIO avec le seul module dont il a besoin.
 pub enum PawnIo {
-    Intel { driver: Driver, tjmax: f32 },
-    Ryzen { driver: Driver, lock: PciLock, tctl_offset: f32 },
+    Intel {
+        driver: Driver,
+        tjmax: f32,
+    },
+    Ryzen {
+        driver: Driver,
+        lock: PciLock,
+        tctl_offset: f32,
+    },
 }
 
 impl PawnIo {
@@ -87,7 +94,11 @@ impl PawnIo {
             Some(Cpu::Ryzen) => {
                 let driver = Driver::open(AMD_FAMILY_17)?;
                 let lock = PciLock::open().ok_or(Unavailable::Refused)?;
-                Ok(Self::Ryzen { driver, lock, tctl_offset: tctl_offset(&brand()) })
+                Ok(Self::Ryzen {
+                    driver,
+                    lock,
+                    tctl_offset: tctl_offset(&brand()),
+                })
             }
             None => Err(Unavailable::Unsupported),
         }
@@ -96,17 +107,23 @@ impl PawnIo {
     /// Température du processeur entier (Intel) ou de contrôle corrigée (Ryzen), en °C.
     pub fn read(&self) -> Reading {
         match self {
-            Self::Intel { driver, tjmax } => match driver.execute("ioctl_read_msr", IA32_PACKAGE_THERM_STATUS) {
-                Some(status) => package_celsius(status, *tjmax).map_or(Reading::Skipped, Reading::Celsius),
-                None => Reading::Failed,
-            },
-            Self::Ryzen { driver, lock, tctl_offset } => {
-                match lock.hold(|| driver.execute("ioctl_read_smn", THM_TCON_CUR_TMP)) {
-                    Some(Some(raw)) => Reading::Celsius(ryzen_celsius(raw as u32, *tctl_offset)),
-                    Some(None) => Reading::Failed,
-                    None => Reading::Skipped,
+            Self::Intel { driver, tjmax } => {
+                match driver.execute("ioctl_read_msr", IA32_PACKAGE_THERM_STATUS) {
+                    Some(status) => {
+                        package_celsius(status, *tjmax).map_or(Reading::Skipped, Reading::Celsius)
+                    }
+                    None => Reading::Failed,
                 }
             }
+            Self::Ryzen {
+                driver,
+                lock,
+                tctl_offset,
+            } => match lock.hold(|| driver.execute("ioctl_read_smn", THM_TCON_CUR_TMP)) {
+                Some(Some(raw)) => Reading::Celsius(ryzen_celsius(raw as u32, *tctl_offset)),
+                Some(None) => Reading::Failed,
+                None => Reading::Skipped,
+            },
         }
     }
 }
@@ -129,11 +146,17 @@ impl Driver {
         }
         .map_err(|e| {
             let missing = [ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND].map(|c| c.to_hresult());
-            if missing.contains(&e.code()) { Unavailable::Missing } else { Unavailable::Refused }
+            if missing.contains(&e.code()) {
+                Unavailable::Missing
+            } else {
+                Unavailable::Refused
+            }
         })?;
         // Fermé par Drop si le module ne se charge pas.
         let driver = Self(handle);
-        driver.control(IOCTL_LOAD_BINARY, module, &mut []).ok_or(Unavailable::Refused)?;
+        driver
+            .control(IOCTL_LOAD_BINARY, module, &mut [])
+            .ok_or(Unavailable::Refused)?;
         Ok(driver)
     }
 
@@ -204,7 +227,14 @@ impl PciLock {
             });
             // Déjà créé par un outil qui n'en laisse que l'usage.
             created
-                .or_else(|| OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE, false, name).ok())
+                .or_else(|| {
+                    OpenMutexW(
+                        SYNCHRONIZATION_SYNCHRONIZE | MUTEX_MODIFY_STATE,
+                        false,
+                        name,
+                    )
+                    .ok()
+                })
                 .map(Self)
         }
     }
@@ -248,9 +278,9 @@ fn cpu() -> Option<Cpu> {
             (id.eax >= 6 && __cpuid(6).eax & (1 << 6) != 0).then_some(Cpu::Intel)
         }
         // « AuthenticAMD »
-        (0x6874_7541, 0x6974_6e65, 0x444d_4163) => {
-            (0x17..=0x1A).contains(&family(__cpuid(1).eax)).then_some(Cpu::Ryzen)
-        }
+        (0x6874_7541, 0x6974_6e65, 0x444d_4163) => (0x17..=0x1A)
+            .contains(&family(__cpuid(1).eax))
+            .then_some(Cpu::Ryzen),
         _ => None,
     }
 }
@@ -259,7 +289,11 @@ fn cpu() -> Option<Cpu> {
 /// vaut 0xF.
 fn family(eax: u32) -> u32 {
     let base = (eax >> 8) & 0xF;
-    if base == 0xF { base + ((eax >> 20) & 0xFF) } else { base }
+    if base == 0xF {
+        base + ((eax >> 20) & 0xFF)
+    } else {
+        base
+    }
 }
 
 /// Nom commercial du processeur (« AMD Ryzen 7 2700X Eight-Core Processor »).
@@ -272,7 +306,9 @@ fn brand() -> String {
         .flat_map(|r| [r.eax, r.ebx, r.ecx, r.edx])
         .flat_map(u32::to_le_bytes)
         .collect();
-    String::from_utf8_lossy(&bytes).trim_matches(['\0', ' ']).to_string()
+    String::from_utf8_lossy(&bytes)
+        .trim_matches(['\0', ' '])
+        .to_string()
 }
 
 /// Appel d'une fonction du module : son nom sur 32 octets complétés de zéros, puis ses arguments.
@@ -323,7 +359,10 @@ fn tctl_offset(brand: &str) -> f32 {
         ("AMD Ryzen Threadripper 19", 27.0),
         ("AMD Ryzen Threadripper 29", 27.0),
     ];
-    TABLE.iter().find(|(model, _)| brand.contains(model)).map_or(0.0, |(_, offset)| *offset)
+    TABLE
+        .iter()
+        .find(|(model, _)| brand.contains(model))
+        .map_or(0.0, |(_, offset)| *offset)
 }
 
 #[cfg(test)]
@@ -375,7 +414,10 @@ mod tests {
     fn ryzen_models_with_a_tctl_offset() {
         assert_eq!(tctl_offset("AMD Ryzen 7 1800X Eight-Core Processor"), 20.0);
         assert_eq!(tctl_offset("AMD Ryzen 7 2700X Eight-Core Processor"), 10.0);
-        assert_eq!(tctl_offset("AMD Ryzen Threadripper 2990WX 32-Core Processor"), 27.0);
+        assert_eq!(
+            tctl_offset("AMD Ryzen Threadripper 2990WX 32-Core Processor"),
+            27.0
+        );
         // Les autres, dont tous les Ryzen depuis la série 3000 : pas d'écart.
         assert_eq!(tctl_offset("AMD Ryzen 5 3600 6-Core Processor"), 0.0);
         assert_eq!(tctl_offset("AMD Ryzen 7 5800X3D 8-Core Processor"), 0.0);

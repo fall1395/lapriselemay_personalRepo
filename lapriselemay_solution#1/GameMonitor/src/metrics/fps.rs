@@ -8,14 +8,14 @@ use std::time::{Duration, Instant};
 
 use ferrisetw::parser::Parser;
 use ferrisetw::provider::{EventFilter, Provider};
-use ferrisetw::trace::{UserTrace, stop_trace_by_name};
+use ferrisetw::trace::{stop_trace_by_name, UserTrace};
 use ferrisetw::{EventRecord, SchemaLocator};
+use windows::core::HRESULT;
 use windows::Win32::Foundation::{
     DXGI_STATUS_MODE_CHANGE_IN_PROGRESS, DXGI_STATUS_NO_DESKTOP_ACCESS, DXGI_STATUS_OCCLUDED,
 };
 use windows::Win32::Graphics::Dxgi::DXGI_PRESENT_TEST;
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows::core::HRESULT;
 
 /// Horodatages ETW en unités de 100 ns.
 const SECOND: i64 = 10_000_000;
@@ -86,10 +86,12 @@ fn shown(runtime: Runtime, result: u32) -> bool {
         return false;
     }
     match runtime {
-        Runtime::Dxgi => {
-            ![DXGI_STATUS_OCCLUDED, DXGI_STATUS_MODE_CHANGE_IN_PROGRESS, DXGI_STATUS_NO_DESKTOP_ACCESS]
-                .contains(&result)
-        }
+        Runtime::Dxgi => ![
+            DXGI_STATUS_OCCLUDED,
+            DXGI_STATUS_MODE_CHANGE_IN_PROGRESS,
+            DXGI_STATUS_NO_DESKTOP_ACCESS,
+        ]
+        .contains(&result),
         Runtime::D3d9 => result != S_PRESENT_OCCLUDED,
     }
 }
@@ -102,14 +104,23 @@ impl State {
         if test {
             self.pending.remove(&tid);
         } else {
-            self.pending.insert(tid, Pending { pid, start, since: Instant::now() });
+            self.pending.insert(
+                tid,
+                Pending {
+                    pid,
+                    start,
+                    since: Instant::now(),
+                },
+            );
         }
     }
 
     /// Fin d'un Present : l'image compte s'il l'a affichée. Si le code de retour est illisible,
     /// elle compte quand même, plutôt que de perdre les FPS.
     fn stop(&mut self, runtime: Runtime, tid: u32, result: Option<u32>) {
-        let Some(present) = self.pending.remove(&tid) else { return };
+        let Some(present) = self.pending.remove(&tid) else {
+            return;
+        };
         if result.is_none_or(|r| shown(runtime, r)) {
             self.record(present.pid, present.start);
         }
@@ -125,7 +136,9 @@ impl State {
         let at = entry.times.partition_point(|&t| t <= ts);
         entry.times.insert(at, ts);
         let newest = entry.times.back().copied().unwrap_or(ts);
-        while entry.times.front().is_some_and(|&t| t < newest - 2 * SECOND) {
+        // Garder aussi l'image précédant la fenêtre : elle ouvre l'intervalle
+        // d'un long gel qui vient de se terminer.
+        while entry.times.get(1).is_some_and(|&t| t < newest - 2 * SECOND) {
             entry.times.pop_front();
         }
     }
@@ -194,7 +207,10 @@ fn present_provider(runtime: Runtime, state: &Shared) -> Provider {
 
 impl FpsTracker {
     pub fn start() -> Self {
-        let mut tracker = Self { state: Shared::default(), trace: None };
+        let mut tracker = Self {
+            state: Shared::default(),
+            trace: None,
+        };
         tracker.resume();
         tracker
     }
@@ -232,8 +248,12 @@ impl FpsTracker {
     pub fn sample(&self, pid: u32) -> Option<FpsInfo> {
         let mut state = self.state.lock().ok()?;
         // On oublie les processus qui n'affichent plus rien, et les Present dont la fin s'est perdue.
-        state.frames.retain(|_, f| f.last_seen.elapsed() < Duration::from_secs(5));
-        state.pending.retain(|_, p| p.since.elapsed() < Duration::from_secs(5));
+        state
+            .frames
+            .retain(|_, f| f.last_seen.elapsed() < Duration::from_secs(5));
+        state
+            .pending
+            .retain(|_, p| p.since.elapsed() < Duration::from_secs(5));
         let frames = state.frames.get(&pid)?;
         if frames.last_seen.elapsed() > Duration::from_secs(3) {
             return None;
@@ -254,13 +274,23 @@ impl Drop for FpsTracker {
 fn summarize(times: &VecDeque<i64>) -> Option<FpsInfo> {
     let newest = *times.back()?;
     // L'image qui précède la première de la seconde : elle ouvre son temps d'image.
-    let first = times.partition_point(|&t| t <= newest - SECOND).saturating_sub(1);
-    let intervals: Vec<i64> = times.range(first..).zip(times.range(first + 1..)).map(|(a, b)| b - a).collect();
+    let first = times
+        .partition_point(|&t| t <= newest - SECOND)
+        .saturating_sub(1);
+    let intervals: Vec<i64> = times
+        .range(first..)
+        .zip(times.range(first + 1..))
+        .map(|(a, b)| b - a)
+        .collect();
     let worst = *intervals.iter().max()?;
     let span = (newest - times[first]) as f32;
     let frametime_ms = span / intervals.len() as f32 / 10_000.0;
     Some(FpsInfo {
-        fps: if frametime_ms > 0.0 { 1000.0 / frametime_ms } else { 0.0 },
+        fps: if frametime_ms > 0.0 {
+            1000.0 / frametime_ms
+        } else {
+            0.0
+        },
         frametime_ms,
         worst_ms: worst as f32 / 10_000.0,
     })
@@ -298,8 +328,38 @@ mod tests {
         // 60 FPS, puis un gel de 1,3 s : il a commencé avant la dernière seconde, mais il s'y termine.
         let info = summarize(&times([0, 166_667, 333_333, 13_333_333, 13_500_000])).unwrap();
         assert!((info.worst_ms - 1300.0).abs() < 0.01, "{}", info.worst_ms);
-        assert!((info.frametime_ms - 658.333).abs() < 0.01, "{}", info.frametime_ms);
+        assert!(
+            (info.frametime_ms - 658.333).abs() < 0.01,
+            "{}",
+            info.frametime_ms
+        );
         assert!(info.fps < 2.0, "{}", info.fps);
+    }
+
+    #[test]
+    fn recording_preserves_a_long_stall_then_expires_it() {
+        let mut state = State::default();
+        for ts in [0, 10 * MS, 3010 * MS] {
+            state.start(1, 10, ts, false);
+            state.stop(Runtime::Dxgi, 1, Some(S_OK));
+        }
+        let info = summarize(&state.frames[&10].times).unwrap();
+        assert!((info.worst_ms - 3000.0).abs() < 0.01);
+        assert!((info.fps - 1.0 / 3.0).abs() < 0.001);
+
+        // La reprise conserve le gel dans la dernière seconde, puis l'en exclut.
+        for i in 1..=220 {
+            state.record(10, (3010 + i * 10) * MS);
+            let info = summarize(&state.frames[&10].times).unwrap();
+            if i == 1 {
+                assert!((info.worst_ms - 3000.0).abs() < 0.01);
+            }
+            if i >= 101 {
+                assert!((info.worst_ms - 10.0).abs() < 0.01);
+                assert!((info.fps - 100.0).abs() < 0.01);
+            }
+        }
+        assert!(state.frames[&10].times.len() <= 202);
     }
 
     #[test]
@@ -317,7 +377,11 @@ mod tests {
 
     /// Images retenues pour le processus `pid`.
     fn recorded(state: &State, pid: u32) -> Vec<i64> {
-        state.frames.get(&pid).map(|f| f.times.iter().copied().collect()).unwrap_or_default()
+        state
+            .frames
+            .get(&pid)
+            .map(|f| f.times.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -381,8 +445,14 @@ mod tests {
         assert!(shown(Runtime::Dxgi, S_OK));
         assert!(!shown(Runtime::Dxgi, DXGI_ERROR_WAS_STILL_DRAWING));
         assert!(!shown(Runtime::Dxgi, DXGI_STATUS_OCCLUDED.0 as u32));
-        assert!(!shown(Runtime::Dxgi, DXGI_STATUS_MODE_CHANGE_IN_PROGRESS.0 as u32));
-        assert!(!shown(Runtime::Dxgi, DXGI_STATUS_NO_DESKTOP_ACCESS.0 as u32));
+        assert!(!shown(
+            Runtime::Dxgi,
+            DXGI_STATUS_MODE_CHANGE_IN_PROGRESS.0 as u32
+        ));
+        assert!(!shown(
+            Runtime::Dxgi,
+            DXGI_STATUS_NO_DESKTOP_ACCESS.0 as u32
+        ));
         assert!(shown(Runtime::D3d9, S_OK));
         assert!(!shown(Runtime::D3d9, S_PRESENT_OCCLUDED.0 as u32));
         // D3DERR_WASSTILLDRAWING

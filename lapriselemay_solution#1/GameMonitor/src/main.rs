@@ -9,13 +9,15 @@ mod placement;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
-use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
+use windows::core::w;
+use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows::Win32::System::LibraryLoader::{
+    SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::core::w;
 
 /// Vrai si GameMonitor tourne déjà dans cette session Windows.
 /// Le mutex reste ouvert jusqu'à la fin du processus : c'est lui qui marque l'instance.
@@ -28,14 +30,13 @@ fn already_running() -> bool {
 
 fn main() {
     // Initialisation du logger
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Info)
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
-    
+
     log::info!("Démarrage GameMonitor v{}", env!("CARGO_PKG_VERSION"));
     log::debug!("Configuration : Rust edition 2021");
-    
+
     // Les DLL chargées en cours de route (par GameMonitor, ou par Windows et les pilotes pour lui)
     // viennent de System32 seulement, jamais du dossier de l'exe : une DLL déposée à côté de
     // GameMonitor y tournerait avec ses droits administrateur. Les DLL liées à l'exe, chargées

@@ -151,19 +151,21 @@ RUST_LOG=debug GameMonitor.exe > gamemonitor.log 2>&1
 
 ### Prérequis
 
-- Rust 1.75+ (chaîne MSVC)
+- Rust 1.95+ (chaîne MSVC)
 - Visual Studio avec les outils C++ (pour les dépendances natives)
 - Windows 10 1607 ou supérieur (pour `/DEPENDENTLOADFLAG`)
 
 ### Intégration Continue
 
-Un workflow GitHub Actions est configuré dans `.github/workflows/ci.yml` et s'exécute
+Un workflow GitHub Actions est configuré dans [`.github/workflows/gamemonitor.yml`](../../.github/workflows/gamemonitor.yml), à la racine du dépôt, et s'exécute
 automatiquement sur chaque push et pull request. Il vérifie :
 
 - Le formatage du code (`cargo fmt`)
-- L'absence d'avertissements avec Clippy (`cargo clippy -D warnings`)
+- L'absence d'avertissements avec Clippy (`cargo clippy -- -D warnings`)
 - La compilation en mode debug et release
 - L'exécution des tests unitaires
+- La compatibilité avec Rust 1.95.0 et la version stable courante
+- Les empreintes SHA-256 des modules PawnIO intégrés
 
 Pour exécuter ces vérifications en local :
 
@@ -172,7 +174,7 @@ Pour exécuter ces vérifications en local :
 cargo fmt --all -- --check
 
 # Clippy
-cargo clippy --all-targets --all-features -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Tests
 cargo test
@@ -219,10 +221,10 @@ pawnio/
 ci/
   smoke-test.ps1   test de fumée Windows (à lancer en administrateur)
   verify-pawnio.ps1 vérification des signatures SHA-256 des modules PawnIO
-.github/
-  workflows/
-    ci.yml          workflow GitHub Actions pour l'intégration continue
 ```
+
+Le workflow d'intégration continue se trouve à la racine du dépôt :
+`.github/workflows/gamemonitor.yml`.
 
 ## Contribution
 

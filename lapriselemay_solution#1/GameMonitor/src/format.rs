@@ -25,7 +25,10 @@ pub struct Line {
 
 impl Line {
     fn new(label: &str) -> Self {
-        Self { label: label.to_string(), parts: Vec::new() }
+        Self {
+            label: label.to_string(),
+            parts: Vec::new(),
+        }
     }
     fn add(mut self, text: impl Into<String>, color: COLORREF) -> Self {
         if !self.parts.is_empty() {
@@ -131,7 +134,10 @@ impl Freshness {
         if taken == self.seen {
             self.unchanged = self.unchanged.saturating_add(1);
         } else {
-            *self = Self { seen: taken, unchanged: 0 };
+            *self = Self {
+                seen: taken,
+                unchanged: 0,
+            };
         }
     }
 
@@ -149,7 +155,12 @@ impl Freshness {
 
 /// Lignes de l'overlay pour la mesure `s`. `frozen` : son âge, si elle est figée (voir [`Freshness`]).
 /// `hint` : avec le rappel des raccourcis.
-pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint: bool) -> Vec<Line> {
+pub fn build_lines(
+    s: &Snapshot,
+    frozen: Option<Duration>,
+    detailed: bool,
+    hint: bool,
+) -> Vec<Line> {
     let mut lines = Vec::new();
     if s.taken.is_none() {
         // Au lancement, et à la réapparition après une pause : la première mesure prend 1 s.
@@ -164,7 +175,13 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
         (false, _) => fps.add("lancer en admin", WARN),
         (true, None) => fps.add("–", DIM),
         (true, Some(f)) => {
-            let color = if f.fps >= 60.0 { GOOD } else if f.fps >= 30.0 { WARN } else { BAD };
+            let color = if f.fps >= 60.0 {
+                GOOD
+            } else if f.fps >= 30.0 {
+                WARN
+            } else {
+                BAD
+            };
             fps.add(format!("{:.0}", f.fps), color)
                 .add(format!("{} ms", dec(f.frametime_ms as f64, 1)), VALUE)
                 .add(format!("pire {} ms", dec(f.worst_ms as f64, 1)), DIM)
@@ -176,16 +193,19 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
     lines.push(fps);
 
     // CPU
-    let mut cpu = Line::new("CPU").add(format!("{:.0} %", s.cpu_usage), load_color(s.cpu_usage as f64));
+    let mut cpu = Line::new("CPU").add(
+        format!("{:.0} %", s.cpu_usage),
+        load_color(s.cpu_usage as f64),
+    );
     if let Some(mhz) = s.cpu_mhz {
         cpu = cpu.add(format!("{} GHz", dec(mhz / 1000.0, 2)), VALUE);
     }
     cpu = match s.cpu_temp {
         // Toujours avec sa source : PawnIO et LHM lisent la sonde du processeur, l'ACPI un capteur
         // de la carte mère, moins fiable.
-        Some(t) if !s.cpu_temp_source.is_empty() => {
-            cpu.add(format!("{t:.0} °C"), temp_color(t)).add(s.cpu_temp_source, DIM)
-        }
+        Some(t) if !s.cpu_temp_source.is_empty() => cpu
+            .add(format!("{t:.0} °C"), temp_color(t))
+            .add(s.cpu_temp_source, DIM),
         Some(t) => cpu.add(format!("{t:.0} °C"), temp_color(t)),
         None => cpu.add("temp. n/d", DIM),
     };
@@ -228,14 +248,23 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
     let ram_pct = s.ram_used as f64 * 100.0 / s.ram_total.max(1) as f64;
     lines.push(
         Line::new("RAM")
-            .add(format!("{} / {}", bytes(s.ram_used as f64), bytes(s.ram_total as f64)), VALUE)
+            .add(
+                format!(
+                    "{} / {}",
+                    bytes(s.ram_used as f64),
+                    bytes(s.ram_total as f64)
+                ),
+                VALUE,
+            )
             .add(format!("{ram_pct:.0} %"), load_color(ram_pct)),
     );
 
     // Disque
     let mut disk = Line::new("Disque");
     if let (Some(r), Some(w)) = (s.disk_read, s.disk_write) {
-        disk = disk.add(format!("L {}", rate(r)), VALUE).add(format!("É {}", rate(w)), VALUE);
+        disk = disk
+            .add(format!("L {}", rate(r)), VALUE)
+            .add(format!("É {}", rate(w)), VALUE);
     }
     if let Some(a) = s.disk_active {
         disk = disk.add(format!("actif {a:.0} %"), load_color(a));
@@ -265,7 +294,8 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
                 if j > 0 {
                     line.parts.push((" ".into(), VALUE));
                 }
-                line.parts.push((format!("{c:>3.0}"), load_color(*c as f64)));
+                line.parts
+                    .push((format!("{c:>3.0}"), load_color(*c as f64)));
             }
             if label.is_empty() {
                 // Aligne les lignes suivantes sous la première.
@@ -275,13 +305,21 @@ pub fn build_lines(s: &Snapshot, frozen: Option<Duration>, detailed: bool, hint:
         }
         if s.swap_total > 0 {
             lines.push(Line::new("Pagin.").add(
-                format!("{} / {}", bytes(s.swap_used as f64), bytes(s.swap_total as f64)),
+                format!(
+                    "{} / {}",
+                    bytes(s.swap_used as f64),
+                    bytes(s.swap_total as f64)
+                ),
                 VALUE,
             ));
         }
         for d in &s.drives {
             lines.push(Line::new(&d.mount).add(
-                format!("{} libres / {}", bytes(d.free as f64), bytes(d.total as f64)),
+                format!(
+                    "{} libres / {}",
+                    bytes(d.free as f64),
+                    bytes(d.total as f64)
+                ),
                 VALUE,
             ));
         }
@@ -324,7 +362,10 @@ mod tests {
 
     /// Une mesure qui vient d'être prise.
     fn measured() -> Snapshot {
-        Snapshot { taken: Some(Instant::now()), ..Default::default() }
+        Snapshot {
+            taken: Some(Instant::now()),
+            ..Default::default()
+        }
     }
 
     /// Lignes d'une mesure qui n'est pas figée.
@@ -345,7 +386,12 @@ mod tests {
     #[test]
     fn waiting_for_the_first_measure() {
         // Au lancement et après une pause, rien n'est encore mesuré : jamais signalé comme figé.
-        let lines = build_lines(&Snapshot::default(), Some(Duration::from_secs(60)), true, true);
+        let lines = build_lines(
+            &Snapshot::default(),
+            Some(Duration::from_secs(60)),
+            true,
+            true,
+        );
         assert_eq!(lines.len(), 1);
         assert!(text(&lines[0]).contains("mesure en cours"));
     }
@@ -353,27 +399,46 @@ mod tests {
     #[test]
     fn fps_line() {
         let mut s = measured();
-        assert_eq!(text(find(&fresh(&s, false, false), "FPS")), "lancer en admin");
+        assert_eq!(
+            text(find(&fresh(&s, false, false), "FPS")),
+            "lancer en admin"
+        );
 
         s.fps_available = true;
         assert_eq!(text(find(&fresh(&s, false, false), "FPS")), "–");
 
-        s.fps = Some(FpsInfo { fps: 143.6, frametime_ms: 6.96, worst_ms: 12.04 });
+        s.fps = Some(FpsInfo {
+            fps: 143.6,
+            frametime_ms: 6.96,
+            worst_ms: 12.04,
+        });
         s.foreground = "Game".into();
-        assert_eq!(text(find(&fresh(&s, false, false), "FPS")), "144  7,0 ms  pire 12,0 ms  Game");
+        assert_eq!(
+            text(find(&fresh(&s, false, false), "FPS")),
+            "144  7,0 ms  pire 12,0 ms  Game"
+        );
     }
 
     #[test]
     fn cpu_line_and_temperature_source() {
-        let mut s = Snapshot { cpu_name: "Intel Core i5-14400F".into(), ..measured() };
+        let mut s = Snapshot {
+            cpu_name: "Intel Core i5-14400F".into(),
+            ..measured()
+        };
         s.cpu_usage = 42.4;
         s.cpu_mhz = Some(4_650.0);
-        assert_eq!(text(find(&fresh(&s, false, false), "CPU")), "42 %  4,65 GHz  temp. n/d");
+        assert_eq!(
+            text(find(&fresh(&s, false, false), "CPU")),
+            "42 %  4,65 GHz  temp. n/d"
+        );
 
         // La source est affichée à côté de la température, en mode compact comme détaillé.
         s.cpu_temp = Some(61.6);
         s.cpu_temp_source = "PawnIO";
-        assert_eq!(text(find(&fresh(&s, false, false), "CPU")), "42 %  4,65 GHz  62 °C  PawnIO");
+        assert_eq!(
+            text(find(&fresh(&s, false, false), "CPU")),
+            "42 %  4,65 GHz  62 °C  PawnIO"
+        );
         s.cpu_temp_source = "ACPI";
         let lines = fresh(&s, true, false);
         assert_eq!(text(find(&lines, "CPU")), "42 %  4,65 GHz  62 °C  ACPI");
@@ -383,29 +448,47 @@ mod tests {
     #[test]
     fn suggests_installing_pawnio() {
         // Processeur Intel sans PawnIO, et aucune température : le mode détaillé dit quoi faire.
-        let s = Snapshot { pawnio_missing: true, ..measured() };
+        let s = Snapshot {
+            pawnio_missing: true,
+            ..measured()
+        };
         let hint = |lines: &[Line]| lines.iter().any(|l| text(l).contains("installer PawnIO"));
         assert!(hint(&fresh(&s, true, false)));
         assert!(!hint(&fresh(&s, false, false)));
         // Une température lue autrement (LibreHardwareMonitor, ACPI) suffit.
-        let s = Snapshot { cpu_temp: Some(50.0), cpu_temp_source: "LHM", ..s };
+        let s = Snapshot {
+            cpu_temp: Some(50.0),
+            cpu_temp_source: "LHM",
+            ..s
+        };
         assert!(!hint(&fresh(&s, true, false)));
     }
 
     #[test]
     fn hint_and_hotkey_warning() {
         let s = measured();
-        let hint = |lines: &[Line]| lines.iter().any(|l| text(l) == "Ctrl+Maj+F10 masquer · F11 déplacer");
+        let hint = |lines: &[Line]| {
+            lines
+                .iter()
+                .any(|l| text(l) == "Ctrl+Maj+F10 masquer · F11 déplacer")
+        };
         assert!(hint(&fresh(&s, false, true)));
         assert!(!hint(&fresh(&s, false, false)));
         // En mode détaillé aussi, c'est l'overlay qui décide d'afficher le rappel ou non.
         assert!(!hint(&fresh(&s, true, false)));
-        assert_eq!(text(&hotkey_warning("F11")), "Raccourci indisponible : Ctrl+Maj+F11");
+        assert_eq!(
+            text(&hotkey_warning("F11")),
+            "Raccourci indisponible : Ctrl+Maj+F11"
+        );
     }
 
     #[test]
     fn frozen_measures_are_greyed_with_a_warning() {
-        let s = Snapshot { cpu_usage: 95.0, cpu_temp: Some(88.0), ..measured() };
+        let s = Snapshot {
+            cpu_usage: 95.0,
+            cpu_temp: Some(88.0),
+            ..measured()
+        };
 
         // Mesure actuelle : pas d'avertissement, couleurs habituelles.
         let lines = fresh(&s, false, false);
@@ -417,7 +500,10 @@ mod tests {
         assert_eq!(text(&lines[0]), "Mesures figées depuis 12 s");
         assert!(lines[0].parts.iter().all(|(_, c)| *c == WARN));
         assert_eq!(text(find(&lines, "CPU")), "95 %  88 °C");
-        assert!(lines[1..].iter().flat_map(|l| &l.parts).all(|(_, c)| *c == DIM));
+        assert!(lines[1..]
+            .iter()
+            .flat_map(|l| &l.parts)
+            .all(|(_, c)| *c == DIM));
     }
 
     /// Instant `secs` secondes après `t0`.
@@ -442,7 +528,10 @@ mod tests {
             assert_eq!(f.frozen(last, at(t0, 9.5 + i as f64)), None);
         }
         f.tick(last);
-        assert_eq!(f.frozen(last, at(t0, 14.5)), Some(Duration::from_millis(5_500)));
+        assert_eq!(
+            f.frozen(last, at(t0, 14.5)),
+            Some(Duration::from_millis(5_500))
+        );
         // Une nouvelle mesure n'est pas figée, même avant le tic suivant.
         assert_eq!(f.frozen(Some(at(t0, 15.0)), at(t0, 15.2)), None);
     }
@@ -469,8 +558,17 @@ mod tests {
 
     #[test]
     fn frozen_warning_duration() {
-        assert_eq!(text(&frozen_warning(Duration::from_millis(12_900))), "Mesures figées depuis 12 s");
-        assert_eq!(text(&frozen_warning(Duration::from_secs(125))), "Mesures figées depuis 2 min 05 s");
-        assert_eq!(text(&frozen_warning(Duration::from_secs(3_900))), "Mesures figées depuis 1 h 05");
+        assert_eq!(
+            text(&frozen_warning(Duration::from_millis(12_900))),
+            "Mesures figées depuis 12 s"
+        );
+        assert_eq!(
+            text(&frozen_warning(Duration::from_secs(125))),
+            "Mesures figées depuis 2 min 05 s"
+        );
+        assert_eq!(
+            text(&frozen_warning(Duration::from_secs(3_900))),
+            "Mesures figées depuis 1 h 05"
+        );
     }
 }

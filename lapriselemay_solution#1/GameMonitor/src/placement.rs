@@ -27,7 +27,11 @@ pub struct Placement {
 impl Default for Placement {
     /// En haut à gauche.
     fn default() -> Self {
-        Self { corner: 0, dx: MARGIN, dy: MARGIN }
+        Self {
+            corner: 0,
+            dx: MARGIN,
+            dy: MARGIN,
+        }
     }
 }
 
@@ -35,8 +39,15 @@ impl Placement {
     /// Position de l'overlay (taille `size`) sur cet écran, mis à l'échelle `scale` (1,0 = 100 %).
     /// L'overlay reste entier sur l'écran, même plus petit que celui où il a été placé.
     pub fn position(&self, screen: RECT, size: (i32, i32), scale: f32) -> (i32, i32) {
-        let gaps = ((self.dx * scale).round() as i32, (self.dy * scale).round() as i32);
-        clamp(screen, size, corner_position(screen, size, gaps, self.corner))
+        let gaps = (
+            (self.dx * scale).round() as i32,
+            (self.dy * scale).round() as i32,
+        );
+        clamp(
+            screen,
+            size,
+            corner_position(screen, size, gaps, self.corner),
+        )
     }
 
     /// Place de l'overlay (taille `size`) posé en `pos` sur cet écran : ancré au coin le plus proche
@@ -44,15 +55,27 @@ impl Placement {
     pub fn from_position(screen: RECT, (w, h): (i32, i32), (x, y): (i32, i32), scale: f32) -> Self {
         let right = 2 * x + w > screen.left + screen.right;
         let bottom = 2 * y + h > screen.top + screen.bottom;
-        let dx = if right { screen.right - (x + w) } else { x - screen.left };
-        let dy = if bottom { screen.bottom - (y + h) } else { y - screen.top };
+        let dx = if right {
+            screen.right - (x + w)
+        } else {
+            x - screen.left
+        };
+        let dy = if bottom {
+            screen.bottom - (y + h)
+        } else {
+            y - screen.top
+        };
         let corner = match (right, bottom) {
             (false, false) => 0,
             (true, false) => 1,
             (true, true) => 2,
             (false, true) => 3,
         };
-        Self { corner, dx: dx.max(0) as f32 / scale, dy: dy.max(0) as f32 / scale }
+        Self {
+            corner,
+            dx: dx.max(0) as f32 / scale,
+            dy: dy.max(0) as f32 / scale,
+        }
     }
 
     /// Contenu du fichier de sauvegarde.
@@ -74,7 +97,9 @@ impl Placement {
             if line.trim_start().starts_with('#') {
                 continue;
             }
-            let Some((key, value)) = line.split_once('=') else { continue };
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
             let value = value.trim();
             match key.trim() {
                 "coin" => corner = value.parse::<u8>().ok().filter(|c| *c < 4),
@@ -83,13 +108,22 @@ impl Placement {
                 _ => {}
             }
         }
-        Some(Self { corner: corner?, dx: dx?, dy: dy? })
+        Some(Self {
+            corner: corner?,
+            dx: dx?,
+            dy: dy?,
+        })
     }
 }
 
 /// Position dans le coin `corner` de l'écran, à `dx` et `dy` pixels de ses deux bords. Coordonnées
 /// négatives pour un écran à gauche ou au-dessus de l'écran principal.
-fn corner_position(screen: RECT, (w, h): (i32, i32), (dx, dy): (i32, i32), corner: u8) -> (i32, i32) {
+fn corner_position(
+    screen: RECT,
+    (w, h): (i32, i32),
+    (dx, dy): (i32, i32),
+    corner: u8,
+) -> (i32, i32) {
     let (left, top) = (screen.left + dx, screen.top + dy);
     let (right, bottom) = (screen.right - w - dx, screen.bottom - h - dy);
     match corner {
@@ -102,12 +136,21 @@ fn corner_position(screen: RECT, (w, h): (i32, i32), (dx, dy): (i32, i32), corne
 
 /// Ramène l'overlay entier sur l'écran (contre son bord haut gauche s'il est plus grand que lui).
 fn clamp(screen: RECT, (w, h): (i32, i32), (x, y): (i32, i32)) -> (i32, i32) {
-    (x.min(screen.right - w).max(screen.left), y.min(screen.bottom - h).max(screen.top))
+    (
+        x.min(screen.right - w).max(screen.left),
+        y.min(screen.bottom - h).max(screen.top),
+    )
 }
 
 /// Position de l'overlay glissé à la souris jusqu'en `pos` : il reste entier sur son écran et,
 /// approché à moins de `reach` pixels d'un bord, s'y aimante à `margin` pixels.
-pub fn dragged(screen: RECT, size: (i32, i32), pos: (i32, i32), margin: i32, reach: i32) -> (i32, i32) {
+pub fn dragged(
+    screen: RECT,
+    size: (i32, i32),
+    pos: (i32, i32),
+    margin: i32,
+    reach: i32,
+) -> (i32, i32) {
     let (w, h) = size;
     let (mut x, mut y) = clamp(screen, size, pos);
     if x - screen.left < reach {
@@ -125,7 +168,11 @@ pub fn dragged(screen: RECT, size: (i32, i32), pos: (i32, i32), margin: i32, rea
 
 /// `%LOCALAPPDATA%\GameMonitor\position.txt`
 fn path() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("GameMonitor").join("position.txt"))
+    Some(
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("GameMonitor")
+            .join("position.txt"),
+    )
 }
 
 /// Place retenue au dernier déplacement ; en haut à gauche s'il n'y en a pas.
@@ -150,7 +197,12 @@ pub fn save(placement: Placement) {
 mod tests {
     use super::*;
 
-    const FHD: RECT = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+    const FHD: RECT = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
     const SIZE: (i32, i32) = (300, 200);
 
     fn at(corner: u8, dx: f32, dy: f32) -> Placement {
@@ -168,10 +220,20 @@ mod tests {
     #[test]
     fn screen_left_of_or_above_the_primary_one() {
         // Écran à gauche de l'écran principal, et plus haut que lui : coordonnées négatives.
-        let left = RECT { left: -2560, top: -360, right: 0, bottom: 1080 };
+        let left = RECT {
+            left: -2560,
+            top: -360,
+            right: 0,
+            bottom: 1080,
+        };
         assert_eq!(at(0, 15.0, 15.0).position(left, SIZE, 1.0), (-2545, -345));
         assert_eq!(at(2, 15.0, 15.0).position(left, SIZE, 1.0), (-315, 865));
-        let above = RECT { left: 0, top: -1080, right: 1920, bottom: 0 };
+        let above = RECT {
+            left: 0,
+            top: -1080,
+            right: 1920,
+            bottom: 0,
+        };
         assert_eq!(at(1, 10.0, 10.0).position(above, SIZE, 1.0), (1610, -1070));
         assert_eq!(at(3, 10.0, 10.0).position(above, SIZE, 1.0), (10, -210));
     }
@@ -185,9 +247,15 @@ mod tests {
     #[test]
     fn anchored_to_the_nearest_corner() {
         // Posé en bas à droite : ancré à ce coin, écarts mesurés depuis les bords droit et bas.
-        assert_eq!(Placement::from_position(FHD, SIZE, (1500, 800), 1.0), at(2, 120.0, 80.0));
+        assert_eq!(
+            Placement::from_position(FHD, SIZE, (1500, 800), 1.0),
+            at(2, 120.0, 80.0)
+        );
         // En haut à gauche d'un écran à 150 % : écarts ramenés en pixels à 100 %.
-        assert_eq!(Placement::from_position(FHD, (450, 300), (60, 30), 1.5), at(0, 40.0, 20.0));
+        assert_eq!(
+            Placement::from_position(FHD, (450, 300), (60, 30), 1.5),
+            at(0, 40.0, 20.0)
+        );
     }
 
     #[test]
@@ -213,7 +281,12 @@ mod tests {
     #[test]
     fn always_entirely_on_the_screen() {
         // Placé loin de son coin sur un grand écran, puis affiché sur un plus petit.
-        let small = RECT { left: 0, top: 0, right: 1366, bottom: 768 };
+        let small = RECT {
+            left: 0,
+            top: 0,
+            right: 1366,
+            bottom: 768,
+        };
         assert_eq!(at(0, 1800.0, 900.0).position(small, SIZE, 1.0), (1066, 568));
     }
 

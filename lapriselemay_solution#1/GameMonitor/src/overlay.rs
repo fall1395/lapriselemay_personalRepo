@@ -6,15 +6,15 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
 
-use crate::format::{self, Freshness, Line, build_lines, hotkey_warning};
+use crate::format::{self, build_lines, hotkey_warning, Freshness, Line};
 use crate::metrics::{self, Control, SharedSnapshot};
 use crate::placement::{self, Placement};
 
@@ -114,7 +114,12 @@ impl State {
 /// la hauteur d'une ligne, marges comprises, pour être facile à viser.
 fn close_box((w, _): (i32, i32), line_h: i32, pad: i32) -> RECT {
     let side = line_h + 2 * pad;
-    RECT { left: w - side, top: 0, right: w, bottom: side }
+    RECT {
+        left: w - side,
+        top: 0,
+        right: w,
+        bottom: side,
+    }
 }
 
 fn contains(r: RECT, pt: POINT) -> bool {
@@ -214,7 +219,8 @@ pub fn run(shared: SharedSnapshot, control: Control) {
         STATE.with(|s| *s.borrow_mut() = Some(state));
 
         // Verrouillé au départ : WS_EX_TRANSPARENT laisse passer les clics jusqu'au jeu.
-        let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        let ex =
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         let Ok(hwnd) = CreateWindowExW(
             ex,
             CLASS,
@@ -303,8 +309,16 @@ fn refresh(hwnd: HWND) {
                 .enumerate()
                 .map(|(i, l)| {
                     let values: i32 = l.parts.iter().map(|(t, _)| text_width(hdc, t)).sum();
-                    let w = if l.label.is_empty() { values } else { st.label_w + gap + values };
-                    if i == 0 { w + close_w } else { w }
+                    let w = if l.label.is_empty() {
+                        values
+                    } else {
+                        st.label_w + gap + values
+                    };
+                    if i == 0 {
+                        w + close_w
+                    } else {
+                        w
+                    }
                 })
                 .max()
                 .unwrap_or(0);
@@ -312,10 +326,16 @@ fn refresh(hwnd: HWND) {
             ReleaseDC(Some(hwnd), hdc);
 
             let pad = st.px(PAD);
-            st.size = (content_w + pad * 2, st.lines.len() as i32 * st.line_h + pad * 2);
+            st.size = (
+                content_w + pad * 2,
+                st.lines.len() as i32 * st.line_h + pad * 2,
+            );
         }
         // Pendant un glissement, l'overlay reste sous la souris : seule sa taille suit le contenu.
-        let pos = st.drag.is_none().then(|| st.placement.position(screen, st.size, st.scale));
+        let pos = st
+            .drag
+            .is_none()
+            .then(|| st.placement.position(screen, st.size, st.scale));
         Some((pos, st.size))
     })
     .flatten();
@@ -328,7 +348,15 @@ fn refresh(hwnd: HWND) {
     };
     unsafe {
         // Réaffirme « toujours au premier plan » à chaque seconde : certains jeux le retirent.
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW | keep);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW | keep,
+        );
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
@@ -348,7 +376,10 @@ fn target_screen(overlay: HWND) -> Option<(RECT, u32)> {
 fn screen_of(window: HWND) -> Option<(RECT, u32)> {
     unsafe {
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         let (mut dpi, mut dpi_y) = (0, 0);
         // Échoue si l'écran vient d'être débranché.
         if GetMonitorInfoW(monitor, &mut info).as_bool()
@@ -364,13 +395,18 @@ fn screen_of(window: HWND) -> Option<(RECT, u32)> {
 fn is_shell_window(hwnd: HWND) -> bool {
     let mut class = [0u16; 256];
     let len = unsafe { GetClassNameW(hwnd, &mut class) };
-    is_shell_class(&String::from_utf16_lossy(&class[..usize::try_from(len).unwrap_or(0)]))
+    is_shell_class(&String::from_utf16_lossy(
+        &class[..usize::try_from(len).unwrap_or(0)],
+    ))
 }
 
 /// Bureau et barres des tâches (écran principal et autres écrans) : cliquer dessus ne doit pas
 /// faire changer l'overlay d'écran.
 fn is_shell_class(class: &str) -> bool {
-    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+    matches!(
+        class,
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
 }
 
 fn paint(hwnd: HWND) {
@@ -401,7 +437,16 @@ fn draw(hdc: HDC, st: &State) {
         let old_font = SelectObject(mem, st.font.into());
 
         let brush = CreateSolidBrush(BG);
-        FillRect(mem, &RECT { left: 0, top: 0, right: w, bottom: h }, brush);
+        FillRect(
+            mem,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            },
+            brush,
+        );
         let _ = DeleteObject(brush.into());
         SetBkMode(mem, TRANSPARENT);
 
@@ -443,7 +488,16 @@ fn draw_unlocked(dc: HDC, st: &State) {
     unsafe {
         let frame = CreateSolidBrush(format::ACCENT);
         for i in 0..thick {
-            FrameRect(dc, &RECT { left: i, top: i, right: w - i, bottom: h - i }, frame);
+            FrameRect(
+                dc,
+                &RECT {
+                    left: i,
+                    top: i,
+                    right: w - i,
+                    bottom: h - i,
+                },
+                frame,
+            );
         }
         let _ = DeleteObject(frame.into());
 
@@ -495,7 +549,11 @@ fn set_mode(hwnd: HWND, visible: bool, unlocked: bool) {
         // Verrouillé, WS_EX_TRANSPARENT laisse passer les clics jusqu'au jeu.
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let transparent = WS_EX_TRANSPARENT.0 as isize;
-        let wanted = if unlocked { ex & !transparent } else { ex | transparent };
+        let wanted = if unlocked {
+            ex & !transparent
+        } else {
+            ex | transparent
+        };
         if wanted != ex {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted);
         }
@@ -507,7 +565,9 @@ fn set_mode(hwnd: HWND, visible: bool, unlocked: bool) {
 }
 
 fn on_hotkey(hwnd: HWND, id: i32) {
-    let Some((visible, unlocked)) = with_state(|st| (st.visible, st.unlocked)) else { return };
+    let Some((visible, unlocked)) = with_state(|st| (st.visible, st.unlocked)) else {
+        return;
+    };
     match id {
         // Réaffiché, l'overlay est verrouillé.
         HK_TOGGLE => set_mode(hwnd, !visible, false),
@@ -520,7 +580,10 @@ fn on_hotkey(hwnd: HWND, id: i32) {
 /// Point (relatif à l'overlay) d'un message de souris : négatif quand la souris, capturée pendant un
 /// glissement, sort de l'overlay par la gauche ou par le haut.
 fn mouse_point(lparam: LPARAM) -> POINT {
-    POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 }
+    POINT {
+        x: (lparam.0 & 0xFFFF) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    }
 }
 
 /// Point de l'overlay en coordonnées d'écran.
@@ -542,7 +605,11 @@ fn set_cursor(hwnd: HWND) -> bool {
             GetCursorPos(&mut pt).ok()?;
             let _ = ScreenToClient(hwnd, &mut pt);
         }
-        Some(if st.on_close_box(pt) { IDC_HAND } else { IDC_SIZEALL })
+        Some(if st.on_close_box(pt) {
+            IDC_HAND
+        } else {
+            IDC_SIZEALL
+        })
     })
     .flatten();
     let Some(id) = cursor else { return false };
@@ -564,7 +631,13 @@ fn on_button_down(hwnd: HWND, pt: POINT) {
         if !st.closing {
             let (screen, _) = screen_of(hwnd)?;
             let start = to_screen(hwnd, pt);
-            st.drag = Some(Drag { grab: pt, start, screen, moved: false, last: None });
+            st.drag = Some(Drag {
+                grab: pt,
+                start,
+                screen,
+                moved: false,
+                last: None,
+            });
         }
         Some(st.closing)
     })
@@ -611,7 +684,15 @@ fn drag_to(hwnd: HWND, cursor: POINT) {
     .flatten();
     if let Some((x, y)) = target {
         unsafe {
-            let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
     }
 }
@@ -620,7 +701,11 @@ fn drag_to(hwnd: HWND, cursor: POINT) {
 /// relâché, même si Windows n'a pas envoyé la souris à l'overlay (curseur sorti de l'overlay).
 fn on_drag_timer(hwnd: HWND) {
     // Bouton principal de la souris : celui de droite pour une souris de gaucher.
-    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+        VK_RBUTTON
+    } else {
+        VK_LBUTTON
+    };
     let held = unsafe { GetAsyncKeyState(i32::from(button.0)) } < 0;
     let mut cursor = POINT::default();
     if !held {
@@ -657,13 +742,16 @@ fn end_press(hwnd: HWND) {
             let _ = ReleaseCapture();
         }
     }
-    let Some(drag) = dropped.filter(|d| d.moved) else { return };
+    let Some(drag) = dropped.filter(|d| d.moved) else {
+        return;
+    };
     let mut rect = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
         return;
     }
     let placed = with_state(|st| {
-        st.placement = Placement::from_position(drag.screen, st.size, (rect.left, rect.top), st.scale);
+        st.placement =
+            Placement::from_position(drag.screen, st.size, (rect.left, rect.top), st.scale);
         st.placement
     });
     if let Some(p) = placed {
@@ -763,7 +851,12 @@ mod tests {
 
     #[test]
     fn desktop_and_taskbars_keep_the_screen() {
-        for class in ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+        for class in [
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+        ] {
             assert!(is_shell_class(class), "{class}");
         }
         for class in ["UnrealWindow", "UnityWndClass", "SDL_app", ""] {
@@ -775,7 +868,15 @@ mod tests {
     fn close_box_in_the_top_right_corner() {
         // Overlay de 400 × 200 à 100 % : un carré de 35 px (ligne de 19 px, marges de 8 px).
         let r = close_box((400, 200), 19, 8);
-        assert_eq!(r, RECT { left: 365, top: 0, right: 400, bottom: 35 });
+        assert_eq!(
+            r,
+            RECT {
+                left: 365,
+                top: 0,
+                right: 400,
+                bottom: 35
+            }
+        );
         assert!(contains(r, POINT { x: 394, y: 6 }));
         assert!(!contains(r, POINT { x: 20, y: 20 }));
         assert!(!contains(r, POINT { x: 394, y: 35 }));

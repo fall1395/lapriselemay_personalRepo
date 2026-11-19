@@ -74,16 +74,29 @@ impl Temps {
         let (outgoing, readings) = mpsc::channel();
         // Le thread s'arrête avec la collecte (`Temps` libéré), ou reste bloqué dans WMI jusqu'à
         // la fin du processus sans retenir personne. S'il ne démarre pas, la température reste « n/d ».
-        let _ = std::thread::Builder::new().name("temperature".into()).spawn(move || {
-            let mut read = reader();
-            while incoming.recv().is_ok() {
-                let temp = read();
-                if outgoing.send(Reading { temp, at: Instant::now() }).is_err() {
-                    break;
+        let _ = std::thread::Builder::new()
+            .name("temperature".into())
+            .spawn(move || {
+                let mut read = reader();
+                while incoming.recv().is_ok() {
+                    let temp = read();
+                    if outgoing
+                        .send(Reading {
+                            temp,
+                            at: Instant::now(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            }
-        });
-        Self { requests, readings, pending: false, last: None }
+            });
+        Self {
+            requests,
+            readings,
+            pending: false,
+            last: None,
+        }
     }
 
     /// Dernière température lue. Si le thread de lecture tarde, la précédente, tant qu'elle n'a pas
@@ -198,7 +211,11 @@ impl Sources {
         } else {
             (None, "")
         };
-        CpuTemp { celsius, source, pawnio_missing: self.pawnio_missing }
+        CpuTemp {
+            celsius,
+            source,
+            pawnio_missing: self.pawnio_missing,
+        }
     }
 
     fn read_pawnio(&mut self) -> Option<f32> {
@@ -207,9 +224,10 @@ impl Sources {
                 self.last_pawnio = Some((t, Instant::now()));
                 Some(t)
             }
-            PawnReading::Skipped => {
-                self.last_pawnio.filter(|(_, at)| at.elapsed() < SKIPPED_GRACE).map(|(t, _)| t)
-            }
+            PawnReading::Skipped => self
+                .last_pawnio
+                .filter(|(_, at)| at.elapsed() < SKIPPED_GRACE)
+                .map(|(t, _)| t),
             PawnReading::Failed => {
                 // Pilote arrêté ou désinstallé entre-temps : dès la mesure suivante, on le rouvre ou,
                 // à défaut, on se connecte aux autres sources.
@@ -222,9 +240,9 @@ impl Sources {
 
     fn read_lhm(&mut self) -> Option<f32> {
         let con = self.lhm.as_ref()?;
-        let rows: Vec<Row> = match con.raw_query(
-            "SELECT Name, Value, Identifier FROM Sensor WHERE SensorType='Temperature'",
-        ) {
+        let rows: Vec<Row> = match con
+            .raw_query("SELECT Name, Value, Identifier FROM Sensor WHERE SensorType='Temperature'")
+        {
             Ok(r) => r,
             Err(_) => {
                 self.lhm = None;
@@ -272,14 +290,21 @@ mod tests {
     use super::*;
 
     fn reading(celsius: f32, source: &'static str) -> CpuTemp {
-        CpuTemp { celsius: Some(celsius), source, pawnio_missing: false }
+        CpuTemp {
+            celsius: Some(celsius),
+            source,
+            pawnio_missing: false,
+        }
     }
 
     /// Appelle `cpu()` comme la collecte, une fois toutes les 10 ms, jusqu'à obtenir `expected`.
     fn wait_for(temps: &mut Temps, expected: CpuTemp) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while temps.cpu() != expected {
-            assert!(Instant::now() < deadline, "toujours pas de lecture {expected:?}");
+            assert!(
+                Instant::now() < deadline,
+                "toujours pas de lecture {expected:?}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -316,6 +341,9 @@ mod tests {
         let at = temps.last.unwrap().at;
         assert_eq!(temps.current(at + MAX_AGE), reading(61.0, "ACPI"));
         // Au-delà, une température qui ne se renouvelle plus n'est plus affichée.
-        assert_eq!(temps.current(at + MAX_AGE + Duration::from_millis(1)), CpuTemp::default());
+        assert_eq!(
+            temps.current(at + MAX_AGE + Duration::from_millis(1)),
+            CpuTemp::default()
+        );
     }
 }

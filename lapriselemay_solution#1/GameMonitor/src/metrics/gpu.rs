@@ -6,12 +6,16 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
-use windows::Win32::Foundation::{FreeLibrary, HMODULE};
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1};
-use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+use nvml_wrapper::Nvml;
 use windows::core::w;
+use windows::Win32::Foundation::{FreeLibrary, HMODULE};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE,
+};
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 
 use super::pdh::{Counter, Pdh};
 
@@ -45,7 +49,11 @@ fn adapter_name() -> Option<String> {
         // Le rendu logiciel de Windows (« Microsoft Basic Render Driver ») n'est pas une carte.
         .find(|desc| desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0)
         .map(|desc| {
-            let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+            let len = desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len());
             String::from_utf16_lossy(&desc.Description[..len])
         })
 }
@@ -56,10 +64,12 @@ fn adapter_name() -> Option<String> {
 /// de l'exe : une DLL déposée à côté de GameMonitor (dans Téléchargements, par exemple) s'y exécuterait
 /// avec ses droits administrateur. Seul un administrateur peut écrire dans System32.
 fn load_nvml() -> Option<Nvml> {
-    let module = unsafe { LoadLibraryExW(w!("nvml.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
+    let module =
+        unsafe { LoadLibraryExW(w!("nvml.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
     // nvml-wrapper la charge à son tour, par son chemin complet : Windows lui rend celle qui est
     // déjà chargée, sans rien chercher d'autre. Elle reste chargée tant qu'il s'en sert.
-    let nvml = module_path(module).and_then(|path| Nvml::builder().lib_path(path.as_os_str()).init().ok());
+    let nvml =
+        module_path(module).and_then(|path| Nvml::builder().lib_path(path.as_os_str()).init().ok());
     unsafe {
         let _ = FreeLibrary(module);
     }
@@ -85,11 +95,19 @@ impl Gpu {
         let pdh = pdh.filter(|_| nvml.is_none());
         let engine = pdh.and_then(|p| p.add(r"\GPU Engine(*engtype_3D)\Utilization Percentage"));
         let dedicated = pdh.and_then(|p| p.add(r"\GPU Adapter Memory(*)\Dedicated Usage"));
-        Self { nvml, name, engine, dedicated }
+        Self {
+            nvml,
+            name,
+            engine,
+            dedicated,
+        }
     }
 
     pub fn read(&self) -> GpuInfo {
-        let mut info = GpuInfo { name: self.name.clone(), ..Default::default() };
+        let mut info = GpuInfo {
+            name: self.name.clone(),
+            ..Default::default()
+        };
         if let Some(nvml) = &self.nvml {
             if let Ok(dev) = nvml.device_by_index(0) {
                 info.usage = dev.utilization_rates().ok().map(|u| u.gpu as f32);
@@ -106,10 +124,17 @@ impl Gpu {
             return info;
         }
         if let Some(engine) = &self.engine {
-            info.usage = Some(busiest_engine(&engine.values()) as f32);
+            let values = engine.values();
+            if !values.is_empty() {
+                info.usage = Some(busiest_engine(&values) as f32);
+            }
         }
         if let Some(dedicated) = &self.dedicated {
-            let max = dedicated.values().iter().map(|(_, v)| *v).fold(0.0, f64::max);
+            let max = dedicated
+                .values()
+                .iter()
+                .map(|(_, v)| *v)
+                .fold(0.0, f64::max);
             if max > 0.0 {
                 info.vram_used = Some(max as u64);
             }
@@ -135,24 +160,36 @@ mod tests {
     use super::*;
 
     fn instance(pid: u32, engine: &str, value: f64) -> (String, f64) {
-        (format!("pid_{pid}_luid_0x00000000_{engine}_engtype_3D"), value)
+        (
+            format!("pid_{pid}_luid_0x00000000_{engine}_engtype_3D"),
+            value,
+        )
     }
 
     #[test]
     fn processes_add_up_on_the_same_engine() {
-        let values = [instance(10, "0x0000C5E2_phys_0_eng_0", 30.0), instance(20, "0x0000C5E2_phys_0_eng_0", 25.0)];
+        let values = [
+            instance(10, "0x0000C5E2_phys_0_eng_0", 30.0),
+            instance(20, "0x0000C5E2_phys_0_eng_0", 25.0),
+        ];
         assert_eq!(busiest_engine(&values), 55.0);
     }
 
     #[test]
     fn two_gpus_are_not_added_together() {
-        let values = [instance(10, "0x0000C5E2_phys_0_eng_0", 40.0), instance(20, "0x0000D1A0_phys_0_eng_0", 70.0)];
+        let values = [
+            instance(10, "0x0000C5E2_phys_0_eng_0", 40.0),
+            instance(20, "0x0000D1A0_phys_0_eng_0", 70.0),
+        ];
         assert_eq!(busiest_engine(&values), 70.0);
     }
 
     #[test]
     fn capped_at_100_and_zero_without_data() {
-        let values = [instance(10, "0x1_phys_0_eng_0", 80.0), instance(20, "0x1_phys_0_eng_0", 40.0)];
+        let values = [
+            instance(10, "0x1_phys_0_eng_0", 80.0),
+            instance(20, "0x1_phys_0_eng_0", 40.0),
+        ];
         assert_eq!(busiest_engine(&values), 100.0);
         assert_eq!(busiest_engine(&[]), 0.0);
     }
@@ -166,7 +203,11 @@ mod tests {
             let path = module_path(module).unwrap();
             let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
             let folder = path.parent().unwrap().as_os_str();
-            assert!(folder.eq_ignore_ascii_case(system32.as_os_str()), "{}", path.display());
+            assert!(
+                folder.eq_ignore_ascii_case(system32.as_os_str()),
+                "{}",
+                path.display()
+            );
         }
     }
 }

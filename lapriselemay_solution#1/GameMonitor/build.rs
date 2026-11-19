@@ -12,6 +12,8 @@ fn main() {
     let no_admin = std::env::var_os("GAMEMONITOR_NO_ADMIN").is_some();
     if release && !no_admin {
         println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
-        println!("cargo:rustc-link-arg-bins=/MANIFESTUAC:level='requireAdministrator' uiAccess='false'");
+        println!(
+            "cargo:rustc-link-arg-bins=/MANIFESTUAC:level='requireAdministrator' uiAccess='false'"
+        );
     }
 }
