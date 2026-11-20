@@ -1,4 +1,4 @@
-//! Les couleurs, polices et mesures de GameBooster : un thème sombre, comme l'overlay de
+//! Les couleurs, polices et mesures de Windows Update Stopper : un thème sombre, comme l'overlay de
 //! GameMonitor.
 
 use windows::core::w;
@@ -8,8 +8,6 @@ use windows::Win32::Graphics::Gdi::{
     DEFAULT_CHARSET, FF_SWISS, FW_NORMAL, FW_SEMIBOLD, HDC, HFONT, OUT_DEFAULT_PRECIS,
     VARIABLE_PITCH,
 };
-
-use crate::catalog::Advice;
 
 // Couleurs, en 0x00BBGGRR.
 pub const BG: COLORREF = COLORREF(0x0014_1414);
@@ -26,18 +24,10 @@ pub const GRAY: COLORREF = COLORREF(0x003C_3C3C);
 pub const GRAY_DOWN: COLORREF = COLORREF(0x002C_2C2C);
 pub const DISABLED: COLORREF = COLORREF(0x0026_2626);
 pub const DISABLED_TEXT: COLORREF = COLORREF(0x005C_5C5C);
-/// Service arrêté par GameBooster.
+/// Service arrêté par Windows Update Stopper.
 pub const BLUE: COLORREF = COLORREF(0x00FF_A658);
 /// Refus de Windows.
 pub const AMBER: COLORREF = COLORREF(0x0022_99D2);
-
-pub fn advice_color(advice: Advice) -> COLORREF {
-    match advice {
-        Advice::Safe => COLORREF(0x0050_B93F),
-        Advice::Depends => AMBER,
-        Advice::Avoid => COLORREF(0x003E_88F0),
-    }
-}
 
 /// Les polices, au DPI de l'écran de la fenêtre.
 #[derive(Clone, Copy)]

@@ -1,14 +1,14 @@
 [package]
-name = "game_booster"
+name = "windows_update_stopper"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
-description = "Gestionnaire de services Windows orienté jeu, natif et léger : arrête les services inutiles pendant le jeu, puis les relance"
+description = "Arrête Windows Update pendant le jeu, puis le relance : natif et léger"
 license = "MIT OR Apache-2.0"
 authors = ["Félix Lemay"]
 
 [[bin]]
-name = "GameBooster"
+name = "WindowsUpdateStopper"
 path = "src/main.rs"
 
 [dependencies]
@@ -31,7 +31,7 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [profile.release]
-# La taille avant la vitesse : GameBooster ne fait presque rien, et rarement.
+# La taille avant la vitesse : Windows Update Stopper ne fait presque rien, et rarement.
 opt-level = "z"
 lto = true
 codegen-units = 1

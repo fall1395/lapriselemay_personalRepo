@@ -1,16 +1,16 @@
-name: GameBooster CI
+name: Windows Update Stopper CI
 
 on:
   push:
     branches: [main]
     paths:
-      - 'lapriselemay_solution#1/GameBooster/**'
-      - '.github/workflows/gamebooster.yml'
+      - 'lapriselemay_solution#1/WindowsUpdateStopper/**'
+      - '.github/workflows/windows-update-stopper.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'lapriselemay_solution#1/GameBooster/**'
-      - '.github/workflows/gamebooster.yml'
+      - 'lapriselemay_solution#1/WindowsUpdateStopper/**'
+      - '.github/workflows/windows-update-stopper.yml'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +21,7 @@ env:
 
 defaults:
   run:
-    working-directory: 'lapriselemay_solution#1/GameBooster'
+    working-directory: 'lapriselemay_solution#1/WindowsUpdateStopper'
 
 jobs:
   build:
@@ -46,7 +46,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: gamebooster-${{ runner.os }}-${{ matrix.toolchain }}-${{ hashFiles('lapriselemay_solution#1/GameBooster/Cargo.lock') }}
+          key: windows-update-stopper-${{ runner.os }}-${{ matrix.toolchain }}-${{ hashFiles('lapriselemay_solution#1/WindowsUpdateStopper/Cargo.lock') }}
 
       - name: Check formatting
         if: matrix.toolchain == 'stable'
@@ -65,10 +65,10 @@ jobs:
         run: cargo build --locked --release
 
       # L'exe prêt à copier sur le PC de jeu, téléchargeable depuis la page de l'exécution.
-      - name: Upload GameBooster.exe
+      - name: Upload WindowsUpdateStopper.exe
         if: matrix.toolchain == 'stable'
         uses: actions/upload-artifact@v4
         with:
-          name: GameBooster
-          path: 'lapriselemay_solution#1/GameBooster/target/release/GameBooster.exe'
+          name: WindowsUpdateStopper
+          path: 'lapriselemay_solution#1/WindowsUpdateStopper/target/release/WindowsUpdateStopper.exe'
           if-no-files-found: error

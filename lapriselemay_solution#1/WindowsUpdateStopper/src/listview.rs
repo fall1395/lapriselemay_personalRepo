@@ -1,5 +1,5 @@
 //! La liste des services : le contrôle ListView de Windows, en mode rapport avec cases à cocher,
-//! en thème sombre. Windows dessinerait l'en-tête en clair : GameBooster le dessine lui-même.
+//! en thème sombre. Windows dessinerait l'en-tête en clair : Windows Update Stopper le dessine lui-même.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -33,10 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::theme::{fill, px, wide, wide_z, DIM, HEADER, LINE, PANEL, TEXT};
 
 /// Les colonnes : titre, largeur à 100 % (0 : la place qui reste), alignée à droite.
-const COLUMNS: [(&str, i32, bool); 5] = [
+const COLUMNS: [(&str, i32, bool); 3] = [
     ("Service", 0, false),
-    ("Catégorie", 132, false),
-    ("Conseil", 122, false),
     ("État", 96, false),
     ("RAM", 86, true),
 ];
@@ -51,13 +49,13 @@ const CLR_NONE: u32 = 0xFFFF_FFFF;
 pub struct Line {
     /// Nom du service : la ligne en garde la trace d'une mise à jour à l'autre.
     pub name: String,
-    pub cells: [String; 5],
+    pub cells: [String; 3],
     pub checked: bool,
 }
 
 thread_local! {
     /// Colonne triée et sens inverse, pour la flèche de l'en-tête.
-    static SORT: Cell<(usize, bool)> = const { Cell::new((1, false)) };
+    static SORT: Cell<(usize, bool)> = const { Cell::new((0, false)) };
 }
 
 fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
@@ -338,7 +336,7 @@ fn draw_header_item(draw: &NMCUSTOMDRAW) {
     };
     let (sorted, reverse) = SORT.with(Cell::get);
     // État et RAM se trient d'abord du plus grand au plus petit (en cours, puis arrêtés).
-    let descending = (column >= 3) != reverse;
+    let descending = (column >= 1) != reverse;
     let arrow = match (sorted == column, descending) {
         (false, _) => "",
         (true, false) => "  ▲",

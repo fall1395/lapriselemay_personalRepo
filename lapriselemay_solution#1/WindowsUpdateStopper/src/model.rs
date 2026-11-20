@@ -137,24 +137,16 @@ pub fn freed(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Column {
     Service,
-    Category,
-    Advice,
     State,
     Ram,
 }
 
 impl Column {
-    pub const ALL: [Column; 5] = [
-        Column::Service,
-        Column::Category,
-        Column::Advice,
-        Column::State,
-        Column::Ram,
-    ];
+    pub const ALL: [Column; 3] = [Column::Service, Column::State, Column::Ram];
 }
 
-/// Trie la liste. Sens naturel : par nom, catégorie et conseil ; ceux qui tournent d'abord ; la
-/// plus grosse RAM d'abord. `reverse` l'inverse.
+/// Trie la liste. Sens naturel : par nom ; ceux qui tournent d'abord ; la plus grosse RAM d'abord.
+/// `reverse` l'inverse.
 pub fn sort(rows: &mut [Row], column: Column, reverse: bool) {
     rows.sort_by(|a, b| {
         let order = match column {
@@ -163,9 +155,6 @@ pub fn sort(rows: &mut [Row], column: Column, reverse: bool) {
                 .label
                 .to_lowercase()
                 .cmp(&b.entry.label.to_lowercase()),
-            // L'ordre du catalogue regroupe déjà les catégories.
-            Column::Category => a.index.cmp(&b.index),
-            Column::Advice => a.entry.advice.cmp(&b.entry.advice),
             Column::State => b.state.is_running().cmp(&a.state.is_running()),
             Column::Ram => b.ram.bytes().cmp(&a.ram.bytes()),
         };
@@ -193,17 +182,16 @@ mod tests {
         }
     }
 
-    /// Windows Update seul dans son processus ; Windows Search et la télémétrie partagent le leur
-    /// avec un service hors catalogue ; le spouleur est arrêté.
+    /// Windows Update seul dans son processus ; l'orchestrateur partage le sien avec un service hors
+    /// catalogue ; BITS est arrêté.
     fn sample() -> (Vec<Info>, HashMap<u32, u64>) {
         let infos = vec![
-            info("Spooler", State::Stopped, 0),
-            info("WSearch", State::Running, 20),
-            info("DiagTrack", State::Running, 20),
-            info("Audiosrv", State::Running, 30),
+            info("BITS", State::Stopped, 0),
+            info("UsoSvc", State::Running, 20),
+            info("Dnscache", State::Running, 20),
             info("wuauserv", State::Running, 10),
-            info("PcaSvc", State::Running, 40),
-            info("Dnscache", State::Running, 40),
+            info("DoSvc", State::Running, 40),
+            info("Audiosrv", State::Running, 30),
         ];
         let ram = HashMap::from([(10, 30 << 20), (20, 50 << 20), (30, 9 << 20), (40, 7 << 20)]);
         (infos, ram)
@@ -214,31 +202,26 @@ mod tests {
         let (infos, ram) = sample();
         let rows = rows(&infos, &ram, &Choices::default());
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        // Audiosrv et Dnscache ne sont pas dans le catalogue ; ordre du catalogue.
-        assert_eq!(
-            names,
-            ["wuauserv", "WSearch", "DiagTrack", "PcaSvc", "Spooler"]
-        );
-        assert_eq!(rows[0].ram, Ram::Own(30 << 20));
-        assert_eq!(rows[1].ram, Ram::Shared(2));
-        assert_eq!(rows[3].ram, Ram::Shared(2));
-        assert_eq!(rows[4].ram, Ram::Unknown);
-        assert_eq!(rows[0].ram_text(), "30 Mo");
-        assert_eq!(rows[1].ram_text(), "partagée");
-        assert_eq!(rows[4].ram_text(), "—");
-        // Cochés par défaut : les services sans risque ; pas le spouleur.
-        assert!(rows[0].checked && !rows[4].checked);
+        // Dnscache et Audiosrv ne sont pas dans le catalogue ; ordre du catalogue.
+        assert_eq!(names, ["UsoSvc", "wuauserv", "BITS", "DoSvc"]);
+        assert_eq!(rows[0].ram, Ram::Shared(2));
+        assert_eq!(rows[1].ram, Ram::Own(30 << 20));
+        assert_eq!(rows[2].ram, Ram::Unknown);
+        assert_eq!(rows[0].ram_text(), "partagée");
+        assert_eq!(rows[1].ram_text(), "30 Mo");
+        assert_eq!(rows[2].ram_text(), "—");
+        // Tout est coché par défaut.
+        assert!(rows.iter().all(|r| r.checked));
     }
 
     #[test]
     fn freeable_counts_only_processes_left_empty() {
         let (infos, ram) = sample();
-        let chosen = HashSet::from(["wuauserv", "WSearch"]);
-        // DiagTrack reste dans le processus de Windows Search : seul wuauserv libère sa RAM.
+        let chosen = HashSet::from(["wuauserv", "UsoSvc"]);
+        // Dnscache reste dans le processus de l'orchestrateur : seul Windows Update libère sa RAM.
         assert_eq!(freeable(&infos, &ram, &chosen), 30 << 20);
-        let chosen = HashSet::from(["wuauserv", "WSearch", "DiagTrack", "PcaSvc", "Spooler"]);
-        // Le processus de PcaSvc garde Dnscache : il ne se ferme pas.
-        assert_eq!(freeable(&infos, &ram, &chosen), 80 << 20);
+        let chosen = HashSet::from(["wuauserv", "UsoSvc", "BITS", "DoSvc"]);
+        assert_eq!(freeable(&infos, &ram, &chosen), 37 << 20);
     }
 
     #[test]
@@ -264,8 +247,8 @@ mod tests {
         sort(&mut rows, Column::Ram, false);
         assert_eq!(rows[0].name, "wuauserv");
         sort(&mut rows, Column::State, false);
-        assert_eq!(rows.last().unwrap().name, "Spooler");
-        sort(&mut rows, Column::Category, true);
-        assert_eq!(rows[0].name, "Spooler");
+        assert_eq!(rows.last().unwrap().name, "BITS");
+        sort(&mut rows, Column::Service, true);
+        assert_eq!(rows[0].name, "wuauserv");
     }
 }

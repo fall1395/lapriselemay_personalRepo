@@ -1,11 +1,11 @@
-//! Ce que GameBooster retient d'un lancement à l'autre, dans `%LOCALAPPDATA%\GameBooster` :
+//! Ce que Windows Update Stopper retient d'un lancement à l'autre, dans `%LOCALAPPDATA%\WindowsUpdateStopper` :
 //!
-//! - `etat.txt` : la session en cours (services arrêtés par GameBooster, mode jeu, RAM libérée).
-//!   Si GameBooster est fermé, ou plante, le lancement suivant sait quoi relancer ;
-//! - `choix.txt` : les cases cochées ou décochées à la main.
+//! - `etat.txt` : la session en cours (services arrêtés par Windows Update Stopper, mode jeu, RAM libérée).
+//!   Si Windows Update Stopper est fermé, ou plante, le lancement suivant sait quoi relancer ;
+//! - `choix.txt` : les cases décochées à la main.
 //!
 //! Seuls les services du catalogue sont relus : ces fichiers, que tout programme de la session peut
-//! modifier, ne peuvent rien faire arrêter ni relancer d'autre à GameBooster.
+//! modifier, ne peuvent rien faire arrêter ni relancer d'autre à Windows Update Stopper.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,7 +15,7 @@ use std::{env, fs, io};
 
 use crate::catalog::{self, Entry};
 
-/// Les services arrêtés par GameBooster, en attendant de les relancer.
+/// Les services arrêtés par Windows Update Stopper, en attendant de les relancer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Session {
     /// Début, en secondes depuis le 1er janvier 1970 (UTC).
@@ -24,7 +24,7 @@ pub struct Session {
     pub since_text: String,
     /// « Tout arrêter » a été cliqué : les services cochés que Windows démarre sont arrêtés aussi.
     pub game_mode: bool,
-    /// Arrêtés par GameBooster, dans l'ordre de leur arrêt.
+    /// Arrêtés par Windows Update Stopper, dans l'ordre de leur arrêt.
     pub stopped: Vec<String>,
     /// RAM libérée par ces arrêts, en octets.
     pub freed: u64,
@@ -42,7 +42,7 @@ impl Session {
     }
 
     fn to_text(&self) -> String {
-        let mut text = String::from("# GameBooster : services arrêtés, à relancer.\n");
+        let mut text = String::from("# Windows Update Stopper : services arrêtés, à relancer.\n");
         let _ = writeln!(text, "depuis={}", self.since);
         let _ = writeln!(text, "heure={}", self.since_text);
         let _ = writeln!(text, "jeu={}", u8::from(self.game_mode));
@@ -73,29 +73,26 @@ impl Session {
     }
 }
 
-/// Les cases changées à la main : nom de l'entrée du catalogue → cochée. Les autres suivent le
-/// conseil (cochées si « sans risque »).
+/// Les cases décochées à la main : nom de l'entrée du catalogue → cochée. Les autres sont
+/// cochées : « Tout arrêter » arrête tout le catalogue, sauf ce qu'on décoche.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Choices(BTreeMap<String, bool>);
 
 impl Choices {
     pub fn is_checked(&self, entry: &Entry) -> bool {
-        self.0
-            .get(entry.name)
-            .copied()
-            .unwrap_or_else(|| entry.advice.checked_by_default())
+        self.0.get(entry.name).copied().unwrap_or(true)
     }
 
     pub fn set(&mut self, entry: &Entry, checked: bool) {
-        if checked == entry.advice.checked_by_default() {
+        if checked {
             self.0.remove(entry.name);
         } else {
-            self.0.insert(entry.name.to_string(), checked);
+            self.0.insert(entry.name.to_string(), false);
         }
     }
 
     fn to_text(&self) -> String {
-        let mut text = String::from("# GameBooster : cases changées à la main.\n");
+        let mut text = String::from("# Windows Update Stopper : cases changées à la main.\n");
         for (name, checked) in &self.0 {
             let key = if *checked { "coche" } else { "decoche" };
             let _ = writeln!(text, "{key}={name}");
@@ -128,7 +125,7 @@ fn pairs(text: &str) -> impl Iterator<Item = (&str, &str)> {
 }
 
 fn dir() -> Option<PathBuf> {
-    Some(PathBuf::from(env::var_os("LOCALAPPDATA")?).join("GameBooster"))
+    Some(PathBuf::from(env::var_os("LOCALAPPDATA")?).join("WindowsUpdateStopper"))
 }
 
 /// Écrit dans un fichier temporaire, puis le renomme : le fichier n'est jamais à moitié écrit.
@@ -204,7 +201,7 @@ mod tests {
             since: 1_763_650_000,
             since_text: "14 h 32".into(),
             game_mode: true,
-            stopped: vec!["wuauserv".into(), "OneSyncSvc_79fad".into()],
+            stopped: vec!["UsoSvc".into(), "wuauserv".into()],
             freed: 123_456_789,
         };
         assert_eq!(Session::parse(&session.to_text()), Some(session));
@@ -213,36 +210,34 @@ mod tests {
     #[test]
     fn session_keeps_only_catalog_services() {
         let text = "depuis=5\nheure=9 h 05\nservice=wuauserv\nservice=WinDefend\n\
-                    service=Malveillant\nservice=GoogleUpdaterService1.2.3\nautre=1\nsans égal\n";
+                    service=Malveillant\nservice=Spooler\nservice=BITS\nautre=1\nsans égal\n";
         let session = Session::parse(text).unwrap();
         assert_eq!(session.since, 5);
         assert!(!session.game_mode);
-        assert_eq!(session.stopped, ["wuauserv", "GoogleUpdaterService1.2.3"]);
+        assert_eq!(session.stopped, ["wuauserv", "BITS"]);
         assert_eq!(Session::parse("service=wuauserv\n"), None);
     }
 
     #[test]
-    fn choices_store_only_changes() {
+    fn choices_store_only_unchecked_boxes() {
         let update = catalog::by_name("wuauserv").unwrap();
-        let printer = catalog::by_name("Spooler").unwrap();
+        let bits = catalog::by_name("BITS").unwrap();
         let mut choices = Choices::default();
-        assert!(choices.is_checked(update));
-        assert!(!choices.is_checked(printer));
+        // Tout est coché par défaut.
+        assert!(choices.is_checked(update) && choices.is_checked(bits));
 
-        choices.set(update, false);
-        choices.set(printer, true);
-        assert!(!choices.is_checked(update));
-        assert!(choices.is_checked(printer));
+        choices.set(bits, false);
+        assert!(!choices.is_checked(bits) && choices.is_checked(update));
         assert_eq!(Choices::parse(&choices.to_text()), choices);
 
-        // Revenir au conseil efface le choix.
-        choices.set(update, true);
-        choices.set(printer, false);
+        // Recocher efface le choix.
+        choices.set(bits, true);
         assert_eq!(choices, Choices::default());
 
         // Seules les entrées du catalogue sont relues.
-        let read = Choices::parse("coche=Spooler\ncoche=WinDefend\ndecoche=Inconnu\n");
-        assert!(read.is_checked(printer));
+        let read =
+            Choices::parse("decoche=BITS\ndecoche=WinDefend\ndecoche=Spooler\ncoche=wuauserv\n");
+        assert!(!read.is_checked(bits));
         assert_eq!(read.0.len(), 1);
     }
 

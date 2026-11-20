@@ -1,7 +1,7 @@
 //! Les appels au gestionnaire de services de Windows (SCM) : la liste des services avec leur état
 //! et leur processus, leur description, leur arrêt et leur relance.
 //!
-//! GameBooster ne change jamais le type de démarrage d'un service : il l'arrête, c'est tout. Si
+//! Windows Update Stopper ne change jamais le type de démarrage d'un service : il l'arrête, c'est tout. Si
 //! Windows redémarre, tout revient donc à la normale de soi-même.
 
 use std::thread;
@@ -235,7 +235,7 @@ fn wait_for(service: &Handle, wanted: State, timeout: Duration) -> bool {
 /// Résultat de l'arrêt d'un service.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Stop {
-    /// Arrêté par GameBooster : à relancer avec « Tout relancer ».
+    /// Arrêté par Windows Update Stopper : à relancer avec « Tout relancer ».
     Stopped,
     /// Déjà arrêté, ou absent de ce PC : rien à faire, ni à relancer.
     Idle,
@@ -265,7 +265,7 @@ pub fn stop(scm: &Scm, name: &str) -> Stop {
         Err(e) if is(&e, ERROR_SERVICE_NOT_ACTIVE) => return Stop::Idle,
         Err(e) => return Stop::Refused(reason(&e)),
     }
-    // Même lent à s'arrêter, il l'a été par GameBooster : il sera relancé comme les autres.
+    // Même lent à s'arrêter, il l'a été par Windows Update Stopper : il sera relancé comme les autres.
     wait_for(&service, State::Stopped, STOP_WAIT);
     Stop::Stopped
 }
@@ -299,7 +299,7 @@ pub fn start(scm: &Scm, name: &str) -> Result<(), String> {
     }
 }
 
-/// Vrai si GameBooster a les droits administrateur : sans eux, Windows refuse d'arrêter les
+/// Vrai si Windows Update Stopper a les droits administrateur : sans eux, Windows refuse d'arrêter les
 /// services.
 pub fn is_elevated() -> bool {
     unsafe {

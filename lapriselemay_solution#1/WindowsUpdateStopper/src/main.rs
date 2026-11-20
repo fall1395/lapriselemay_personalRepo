@@ -1,9 +1,9 @@
 // Pas de fenêtre de console en release.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! GameBooster : un gestionnaire de services Windows orienté jeu. Il liste les services inutiles
-//! pendant une partie, la RAM qu'ils occupent, et les arrête un à un ou tous d'un coup ; puis il
-//! relance exactement ceux qu'il a arrêtés.
+//! Windows Update Stopper : il arrête Windows Update pendant une partie (Windows Update, son orchestrateur,
+//! BITS et l'Optimisation de la distribution), un à un ou tous d'un coup, puis relance exactement
+//! ceux qu'il a arrêtés.
 
 mod catalog;
 mod listview;
@@ -24,11 +24,11 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 
-/// Vrai si GameBooster tourne déjà dans cette session Windows.
+/// Vrai si Windows Update Stopper tourne déjà dans cette session Windows.
 /// Le mutex reste ouvert jusqu'à la fin du processus : c'est lui qui marque l'instance.
 fn already_running() -> bool {
     unsafe {
-        CreateMutexW(None, false, w!("Local\\GameBooster")).is_ok()
+        CreateMutexW(None, false, w!("Local\\WindowsUpdateStopper")).is_ok()
             && GetLastError() == ERROR_ALREADY_EXISTS
     }
 }
@@ -41,7 +41,7 @@ fn main() {
     unsafe {
         let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
-    // Deux GameBooster arrêteraient et relanceraient les mêmes services chacun de leur côté :
+    // Deux Windows Update Stopper arrêteraient et relanceraient les mêmes services chacun de leur côté :
     // un second lancement réaffiche plutôt le premier.
     if already_running() {
         ui::show_existing();

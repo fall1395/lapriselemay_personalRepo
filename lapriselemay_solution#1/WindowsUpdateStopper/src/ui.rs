@@ -1,7 +1,7 @@
-//! La fenêtre de GameBooster, en Win32 pur. En haut : « Tout arrêter », « Tout relancer », l'état
-//! du mode jeu et la RAM que « Tout arrêter » libérerait avec les cases cochées. Au milieu : la
-//! liste des services inutiles en jeu. En bas : le détail du service sélectionné, avec son bouton
-//! Arrêter ou Relancer, puis la RAM du PC.
+//! La fenêtre de Windows Update Stopper, en Win32 pur. En haut : « Tout arrêter », « Tout relancer », l'état
+//! du mode jeu et la RAM que « Tout arrêter » libérerait avec les cases cochées. Au milieu : les
+//! services de Windows Update. En bas : le détail du service sélectionné, avec son bouton Arrêter
+//! ou Relancer, puis la RAM du PC.
 //!
 //! Arrêter ou relancer des services prend quelques secondes : c'est fait dans un fil à part, pour
 //! que la fenêtre reste réactive, et les boutons sont grisés pendant ce temps. La liste se met à
@@ -35,18 +35,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::catalog::Advice;
 use crate::listview::{self, Line};
 use crate::memory;
 use crate::model::{self, Column, Ram, Row};
 use crate::services::{self, Info, Scm, Stop};
 use crate::state::{self, Choices, Session};
 use crate::theme::{
-    self, fill, px, wide, Fonts, AMBER, BG, BLUE, DIM, DISABLED, DISABLED_TEXT, GRAY, GRAY_DOWN,
-    GREEN, GREEN_DOWN, PANEL, TEXT, WHITE,
+    fill, px, wide, Fonts, AMBER, BG, BLUE, DIM, DISABLED, DISABLED_TEXT, GRAY, GRAY_DOWN, GREEN,
+    GREEN_DOWN, PANEL, TEXT, WHITE,
 };
 
-const CLASS: PCWSTR = w!("GameBoosterWindow");
+const CLASS: PCWSTR = w!("WindowsUpdateStopperWindow");
 // Identifiants des contrôles. Pas 1 ni 2 : Entrée et Échap envoient IDOK (1) et IDCANCEL (2).
 const ID_STOP_ALL: usize = 101;
 const ID_START_ALL: usize = 102;
@@ -55,7 +54,7 @@ const ID_ONE: usize = 104;
 const ID_MENU_ONE: usize = 201;
 /// Fin d'un travail du fil d'arrière-plan ; LPARAM porte un `Box<Done>`.
 const WM_APP_DONE: u32 = WM_APP + 1;
-/// Envoyé par un second lancement de GameBooster : réafficher la fenêtre.
+/// Envoyé par un second lancement de Windows Update Stopper : réafficher la fenêtre.
 const WM_APP_SHOW: u32 = WM_APP + 2;
 /// Mise à jour de la liste.
 const REFRESH_TIMER: usize = 1;
@@ -69,9 +68,9 @@ const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | WS_CLIPCHILDREN
 
 // Mise en page, en pixels à 100 %.
 const START_W: i32 = 820;
-const START_H: i32 = 680;
+const START_H: i32 = 470;
 const MIN_W: i32 = 680;
-const MIN_H: i32 = 560;
+const MIN_H: i32 = 450;
 const PAD: i32 = 16;
 const TOP_BTN_W: i32 = 150;
 const TOP_BTN_H: i32 = 44;
@@ -153,16 +152,16 @@ struct Ui {
     just_restopped: HashSet<String>,
     /// Relancés par Windows aussitôt arrêtés : un autre service s'en sert (ICS pour le réseau de
     /// WSL 2, par exemple). Le minuteur et « Tout arrêter » les laissent tourner jusqu'à la
-    /// fermeture de GameBooster, ou jusqu'à ce qu'on les arrête un à un.
+    /// fermeture de Windows Update Stopper, ou jusqu'à ce qu'on les arrête un à un.
     relaunched: HashSet<String>,
     note: Option<String>,
-    /// Fermer GameBooster dès les services relancés.
+    /// Fermer Windows Update Stopper dès les services relancés.
     quit_after: bool,
 }
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
-    /// Vrai pendant que GameBooster remplit la liste : ses notifications ne viennent pas d'un clic.
+    /// Vrai pendant que Windows Update Stopper remplit la liste : ses notifications ne viennent pas d'un clic.
     static FILLING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -178,11 +177,11 @@ fn read_ui<R>(f: impl FnOnce(&Ui) -> R) -> Option<R> {
     UI.with(|cell| cell.try_borrow().ok()?.as_ref().map(f))
 }
 
-/// Second lancement : réaffiche la fenêtre du premier GameBooster.
+/// Second lancement : réaffiche la fenêtre du premier Windows Update Stopper.
 pub fn show_existing() {
     unsafe {
         if let Ok(hwnd) = FindWindowW(CLASS, PCWSTR::null()) {
-            // C'est l'utilisateur qui vient de relancer GameBooster : le premier a le droit de
+            // C'est l'utilisateur qui vient de relancer Windows Update Stopper : le premier a le droit de
             // passer au premier plan.
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
@@ -213,7 +212,7 @@ pub fn run() {
         let Ok(hwnd) = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             CLASS,
-            w!("GameBooster"),
+            w!("Windows Update Stopper"),
             STYLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -253,7 +252,7 @@ pub fn run() {
                 ram: HashMap::new(),
                 system_ram: None,
                 shown: Vec::new(),
-                sort: (Column::Category, false),
+                sort: (Column::Service, false),
                 selected: None,
                 description: None,
                 choices,
@@ -268,7 +267,7 @@ pub fn run() {
                 quit_after: false,
             });
         });
-        listview::set_sort(list, 1, false);
+        listview::set_sort(list, 0, false);
         // Taille de départ ; WM_SIZE place ensuite les contrôles.
         let mut rect = RECT {
             left: 0,
@@ -323,7 +322,7 @@ fn previous_session() -> (Option<Session>, bool) {
     (Some(session), ended)
 }
 
-/// Bouton dessiné par GameBooster (BS_OWNERDRAW) : voir `draw_button`.
+/// Bouton dessiné par Windows Update Stopper (BS_OWNERDRAW) : voir `draw_button`.
 fn button(parent: HWND, instance: HINSTANCE, id: usize, text: PCWSTR) -> HWND {
     let style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32);
     unsafe {
@@ -489,8 +488,6 @@ fn lines(rows: &[Row]) -> Vec<Line> {
             name: row.name.clone(),
             cells: [
                 row.entry.label.to_string(),
-                row.entry.category.label().to_string(),
-                row.entry.advice.label().to_string(),
                 row.state.label().to_string(),
                 row.ram_text(),
             ],
@@ -664,7 +661,7 @@ fn on_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     }
 }
 
-/// Couleur du texte de chaque cellule : le conseil en couleur, le reste selon l'état.
+/// Couleur du texte de chaque cellule, selon l'état du service.
 fn list_colors(draw: &mut NMLVCUSTOMDRAW) -> u32 {
     let stage = draw.nmcd.dwDrawStage.0;
     if stage == CDDS_PREPAINT.0 {
@@ -686,17 +683,15 @@ fn cell_color(ui: &Ui, index: usize, column: i32) -> Option<COLORREF> {
     let row = ui.rows.get(index)?;
     let running = row.state.is_running();
     Some(match column {
-        1 => DIM,
-        2 => theme::advice_color(row.entry.advice),
-        3 if ui.relaunched.contains(&row.name) => AMBER,
-        3 if running => TEXT,
-        3 if by_app(ui, &row.name) => BLUE,
-        3 | 4 if !running => DIM,
+        1 if ui.relaunched.contains(&row.name) => AMBER,
+        1 if running => TEXT,
+        1 if by_app(ui, &row.name) => BLUE,
+        1 | 2 if !running => DIM,
         _ => TEXT,
     })
 }
 
-/// Vrai si le service a été arrêté par GameBooster, et attend d'être relancé.
+/// Vrai si le service a été arrêté par Windows Update Stopper, et attend d'être relancé.
 fn by_app(ui: &Ui, name: &str) -> bool {
     ui.session
         .as_ref()
@@ -836,7 +831,7 @@ fn update_one_button(hwnd: HWND) {
         }
         let _ = EnableWindow(one, enabled);
         // Bouton grisé qui avait le focus clavier : le focus passe à la liste. Seulement si
-        // GameBooster est au premier plan : SetFocus activerait sinon sa fenêtre, par-dessus le jeu.
+        // Windows Update Stopper est au premier plan : SetFocus activerait sinon sa fenêtre, par-dessus le jeu.
         if !enabled && GetFocus() == one && GetForegroundWindow() == hwnd {
             let _ = SetFocus(Some(list));
         }
@@ -882,36 +877,14 @@ fn on_right_click(hwnd: HWND) {
 
 /// Arrête ou démarre le service sélectionné.
 fn on_one(hwnd: HWND) {
-    let Some((name, running, avoid, label, note)) = read_ui(|ui| {
+    let Some((name, running)) = read_ui(|ui| {
         let (_, enabled) = one_action(ui)?;
         let row = selected_row(ui)?;
-        enabled.then(|| {
-            (
-                row.name.clone(),
-                row.state.is_running(),
-                row.entry.advice == Advice::Avoid,
-                row.entry.label,
-                row.entry.note,
-            )
-        })
+        enabled.then(|| (row.name.clone(), row.state.is_running()))
     })
     .flatten() else {
         return;
     };
-    if running && avoid {
-        let text = format!("{label} : déconseillé.\n\n{note}\n\nL'arrêter quand même ?");
-        let answer = unsafe {
-            MessageBoxW(
-                Some(hwnd),
-                &HSTRING::from(text),
-                w!("GameBooster"),
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
-            )
-        };
-        if answer != IDYES {
-            return;
-        }
-    }
     let names = vec![name];
     let job = if running {
         Job::Stop { names, all: false }
@@ -1120,7 +1093,7 @@ fn on_done(hwnd: HWND, done: Done) {
             Done::Failed(error) => ui.note = Some(format!("Échec : {error}")),
         }
         persist(ui.session.as_ref());
-        // Relance ratée : GameBooster reste ouvert, la session aussi.
+        // Relance ratée : Windows Update Stopper reste ouvert, la session aussi.
         if ui.session.is_some() {
             ui.quit_after = false;
         }
@@ -1275,12 +1248,12 @@ fn on_close(hwnd: HWND) {
     let answer = unsafe {
         MessageBoxW(
             Some(hwnd),
-            w!("Des services arrêtés par GameBooster le sont encore.\n\n\
+            w!("Des services arrêtés par Windows Update Stopper le sont encore.\n\n\
                 Oui : les relancer, puis quitter.\n\
-                Non : quitter sans les relancer. Le prochain lancement de GameBooster les \
+                Non : quitter sans les relancer. Le prochain lancement de Windows Update Stopper les \
                 retrouvera ; un redémarrage de Windows les relance aussi.\n\
-                Annuler : revenir à GameBooster."),
-            w!("GameBooster"),
+                Annuler : revenir à Windows Update Stopper."),
+            w!("Windows Update Stopper"),
             MB_YESNOCANCEL | MB_ICONQUESTION,
         )
     };
@@ -1469,22 +1442,14 @@ fn draw_details(hdc: HDC, ui: &Ui, area: &RECT) {
         ONE_LINE,
     );
     y += p(19);
-    let advice = row.entry.advice.label();
-    let color = theme::advice_color(row.entry.advice);
     put(
         hdc,
         ui.fonts.text,
-        color,
-        advice,
+        TEXT,
+        row.entry.note,
         line(y, p(17), right),
         ONE_LINE,
     );
-    let note = format!(" · {}", row.entry.note);
-    let note_rect = RECT {
-        left: left + text_width(hdc, ui.fonts.text, advice),
-        ..line(y, p(17), right)
-    };
-    put(hdc, ui.fonts.text, TEXT, &note, note_rect, ONE_LINE);
     y += p(19);
     let (state, color) = state_line(ui, row);
     put(
@@ -1528,18 +1493,18 @@ fn state_line(ui: &Ui, row: &Row) -> (String, COLORREF) {
         return (text, AMBER);
     }
     if ui.relaunched.contains(&row.name) {
-        let advice = if row.checked {
+        let hint = if row.checked {
             " Mieux vaut le décocher."
         } else {
             ""
         };
         let text =
-            format!("Windows le relance aussitôt arrêté : un autre service s'en sert.{advice}");
+            format!("Windows le relance aussitôt arrêté : un autre service s'en sert.{hint}");
         return (text, AMBER);
     }
     match row.ram {
         _ if !row.state.is_running() && by_app(ui, &row.name) => (
-            "Arrêté par GameBooster : « Relancer » ou « Tout relancer » le remet en marche.".into(),
+            "Arrêté par l'appli : « Relancer » ou « Tout relancer » le remet en marche.".into(),
             BLUE,
         ),
         _ if !row.state.is_running() => (format!("{}.", row.state.label()), DIM),
@@ -1610,7 +1575,7 @@ fn status(ui: &Ui) -> (String, String) {
             "Lecture seule".into(),
             sentences(
                 &text,
-                "Relance GameBooster en administrateur pour arrêter des services.",
+                "Relance l'appli en administrateur pour arrêter des services.",
             ),
         );
     }
@@ -1633,11 +1598,7 @@ fn status(ui: &Ui) -> (String, String) {
             )
         }
         Some(session) => (
-            count(
-                session.stopped.len(),
-                "service arrêté par GameBooster",
-                "services arrêtés par GameBooster",
-            ),
+            count(session.stopped.len(), "service arrêté", "services arrêtés"),
             format!(
                 "≈ {} libérés. « Tout relancer » les remet en marche.",
                 memory::format(session.freed)
@@ -1783,6 +1744,7 @@ fn draw_button(item: &DRAWITEMSTRUCT) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog;
     use crate::services::State;
 
     #[test]
@@ -1810,14 +1772,17 @@ mod tests {
                 pid: 10,
             },
             Info {
-                name: "Spooler".into(),
-                display_name: "Spouleur d'impression".into(),
+                name: "BITS".into(),
+                display_name: "Service de transfert intelligent en arrière-plan".into(),
                 state: State::Running,
                 pid: 20,
             },
         ];
         let ram = HashMap::from([(10, 30 << 20), (20, 8 << 20)]);
-        let rows = model::rows(&infos, &ram, &Choices::default());
+        // BITS décoché : seule la RAM de Windows Update est libérable.
+        let mut choices = Choices::default();
+        choices.set(catalog::by_name("BITS").unwrap(), false);
+        let rows = model::rows(&infos, &ram, &choices);
         Ui {
             stop_all: HWND::default(),
             start_all: HWND::default(),
@@ -1837,10 +1802,10 @@ mod tests {
             ram,
             system_ram: None,
             shown: Vec::new(),
-            sort: (Column::Category, false),
+            sort: (Column::Service, false),
             selected: None,
             description: None,
-            choices: Choices::default(),
+            choices,
             session: None,
             allowed: HashSet::new(),
             refused: Vec::new(),
@@ -1856,7 +1821,7 @@ mod tests {
     #[test]
     fn status_lines() {
         let mut ui = sample();
-        // Le spouleur n'est pas coché : seule la RAM de Windows Update est libérable.
+        // BITS n'est pas coché : seule la RAM de Windows Update est libérable.
         assert_eq!(
             status(&ui),
             (
@@ -1883,7 +1848,7 @@ mod tests {
                 "1 service arrêté · ≈ 30 Mo libérés · 2 démarrés par Windows, arrêtés.".into()
             )
         );
-        // Le spouleur coché en plus : ce que « Tout arrêter » libérerait encore.
+        // BITS coché en plus : ce que « Tout arrêter » libérerait encore.
         ui.rows[1].checked = true;
         assert_eq!(
             status(&ui).1,
@@ -1912,7 +1877,7 @@ mod tests {
             (
                 "Lecture seule".into(),
                 "« Tout arrêter » libérerait ≈ 30 Mo (1 service coché en cours). \
-                 Relance GameBooster en administrateur pour arrêter des services."
+                 Relance l'appli en administrateur pour arrêter des services."
                     .into()
             )
         );
@@ -1925,12 +1890,12 @@ mod tests {
         assert_eq!(check_row(&mut ui, 1, true), Some(Vec::new()));
         assert!(ui.rows[1].checked && ui.allowed.is_empty());
         check_row(&mut ui, 1, false);
-        // En mode jeu, le minuteur laisse tourner le spouleur, coché alors qu'il tourne…
+        // En mode jeu, le minuteur laisse tourner BITS, coché alors qu'il tourne…
         let mut session = Session::new(0, String::new());
         session.game_mode = true;
         ui.session = Some(session);
         check_row(&mut ui, 1, true);
-        assert!(ui.allowed.contains("Spooler"));
+        assert!(ui.allowed.contains("BITS"));
         // … mais arrêtera Windows Update, coché arrêté, si Windows le démarre.
         ui.rows[0].state = State::Stopped;
         check_row(&mut ui, 0, false);
@@ -1970,25 +1935,25 @@ mod tests {
     fn watcher_leaves_what_windows_relaunches_at_once() {
         let mut ui = sample();
         let mut session = Session::new(0, String::new());
-        session.stopped.push("Spooler".into());
+        session.stopped.push("BITS".into());
         ui.session = Some(session);
-        let running = HashSet::from(["wuauserv".to_string(), "Spooler".to_string()]);
-        // Le spouleur, arrêté par GameBooster, tourne de nouveau : le minuteur l'arrête.
+        let running = HashSet::from(["wuauserv".to_string(), "BITS".to_string()]);
+        // BITS, arrêté par Windows Update Stopper, tourne de nouveau : le minuteur l'arrête.
         let plan = watch_plan(&ui, &running);
-        assert_eq!(plan, Some((vec!["Spooler".to_string()], Vec::new())));
+        assert_eq!(plan, Some((vec!["BITS".to_string()], Vec::new())));
         assert_eq!(
-            after_watch(&mut ui, vec!["Spooler".into()], Vec::new()),
+            after_watch(&mut ui, vec!["BITS".into()], Vec::new()),
             (true, false)
         );
         // Revenu dès le tour suivant : Windows le relance aussitôt. Il est laissé tourner, et la
         // session, sans plus rien à relancer, se termine.
         let plan = watch_plan(&ui, &running);
-        assert_eq!(plan, Some((Vec::new(), vec!["Spooler".to_string()])));
+        assert_eq!(plan, Some((Vec::new(), vec!["BITS".to_string()])));
         assert_eq!(
-            after_watch(&mut ui, Vec::new(), vec!["Spooler".into()]),
+            after_watch(&mut ui, Vec::new(), vec!["BITS".into()]),
             (true, true)
         );
-        assert!(ui.session.is_none() && ui.relaunched.contains("Spooler"));
+        assert!(ui.session.is_none() && ui.relaunched.contains("BITS"));
 
         // Coché, il reste en dehors de « Tout arrêter », de son estimation et du minuteur ; son
         // détail l'explique.
@@ -2002,9 +1967,9 @@ mod tests {
             .ends_with("≈ 30 Mo de plus (1 service coché en cours)."));
         let plan = watch_plan(&ui, &running);
         assert_eq!(plan, Some((vec!["wuauserv".to_string()], Vec::new())));
-        let printer = ui.rows[1].clone();
+        let bits = ui.rows[1].clone();
         assert_eq!(
-            state_line(&ui, &printer).0,
+            state_line(&ui, &bits).0,
             "Windows le relance aussitôt arrêté : un autre service s'en sert. \
              Mieux vaut le décocher."
         );
