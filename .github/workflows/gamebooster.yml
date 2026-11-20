@@ -1,0 +1,74 @@
+name: GameBooster CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lapriselemay_solution#1/GameBooster/**'
+      - '.github/workflows/gamebooster.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'lapriselemay_solution#1/GameBooster/**'
+      - '.github/workflows/gamebooster.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: 'lapriselemay_solution#1/GameBooster'
+
+jobs:
+  build:
+    name: Windows (Rust ${{ matrix.toolchain }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.95.0', stable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: gamebooster-${{ runner.os }}-${{ matrix.toolchain }}-${{ hashFiles('lapriselemay_solution#1/GameBooster/Cargo.lock') }}
+
+      - name: Check formatting
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Build (debug)
+        run: cargo build --locked
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build (release)
+        run: cargo build --locked --release
+
+      # L'exe prêt à copier sur le PC de jeu, téléchargeable depuis la page de l'exécution.
+      - name: Upload GameBooster.exe
+        if: matrix.toolchain == 'stable'
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameBooster
+          path: 'lapriselemay_solution#1/GameBooster/target/release/GameBooster.exe'
+          if-no-files-found: error

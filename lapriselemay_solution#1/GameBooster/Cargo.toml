@@ -1,0 +1,39 @@
+[package]
+name = "game_booster"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Gestionnaire de services Windows orienté jeu, natif et léger : arrête les services inutiles pendant le jeu, puis les relance"
+license = "MIT OR Apache-2.0"
+authors = ["Félix Lemay"]
+
+[[bin]]
+name = "GameBooster"
+path = "src/main.rs"
+
+[dependencies]
+windows = { version = "0.62.2", features = [
+    "Wdk_System_SystemInformation",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+# La taille avant la vitesse : GameBooster ne fait presque rien, et rarement.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
