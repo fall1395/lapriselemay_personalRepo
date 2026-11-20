@@ -1,11 +1,13 @@
-//! La fenêtre de GameBooster, en Win32 pur. En haut : « Tout arrêter », « Tout relancer » et
-//! l'état du mode jeu. Au milieu : la liste des services inutiles en jeu. En bas : le détail du
-//! service sélectionné, avec son bouton Arrêter ou Relancer, puis la RAM du PC.
+//! La fenêtre de GameBooster, en Win32 pur. En haut : « Tout arrêter », « Tout relancer », l'état
+//! du mode jeu et la RAM que « Tout arrêter » libérerait avec les cases cochées. Au milieu : la
+//! liste des services inutiles en jeu. En bas : le détail du service sélectionné, avec son bouton
+//! Arrêter ou Relancer, puis la RAM du PC.
 //!
 //! Arrêter ou relancer des services prend quelques secondes : c'est fait dans un fil à part, pour
 //! que la fenêtre reste réactive, et les boutons sont grisés pendant ce temps. La liste se met à
 //! jour toutes les 3 s (sauf fenêtre réduite). En mode jeu, un minuteur arrête aussi, toutes les
-//! 30 s, les services cochés que Windows a démarrés ou relancés entre-temps.
+//! 30 s, les services cochés que Windows a démarrés ou relancés entre-temps ; mais pas ceux que
+//! Windows relance aussitôt arrêtés : il les laisse tourner.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -139,12 +141,20 @@ struct Ui {
     description: Option<(String, Option<String>)>,
     choices: Choices,
     session: Option<Session>,
-    /// Démarrés à la main pendant le mode jeu : le minuteur les laisse tourner.
+    /// Démarrés à la main, ou cochés alors qu'ils tournaient, pendant le mode jeu : le minuteur les
+    /// laisse tourner jusqu'au prochain « Tout arrêter ».
     allowed: HashSet<String>,
     refused: Vec<Issue>,
     failed: Vec<Issue>,
     /// Démarrés par Windows pendant la session, puis arrêtés par le minuteur.
     restopped: usize,
+    /// Arrêtés de nouveau par le minuteur à son dernier tour : s'ils tournent encore au suivant,
+    /// Windows les relance aussitôt arrêtés.
+    just_restopped: HashSet<String>,
+    /// Relancés par Windows aussitôt arrêtés : un autre service s'en sert (ICS pour le réseau de
+    /// WSL 2, par exemple). Le minuteur et « Tout arrêter » les laissent tourner jusqu'à la
+    /// fermeture de GameBooster, ou jusqu'à ce qu'on les arrête un à un.
+    relaunched: HashSet<String>,
     note: Option<String>,
     /// Fermer GameBooster dès les services relancés.
     quit_after: bool,
@@ -252,6 +262,8 @@ pub fn run() {
                 refused: Vec::new(),
                 failed: Vec::new(),
                 restopped: 0,
+                just_restopped: HashSet::new(),
+                relaunched: HashSet::new(),
                 note: None,
                 quit_after: false,
             });
@@ -676,6 +688,7 @@ fn cell_color(ui: &Ui, index: usize, column: i32) -> Option<COLORREF> {
     Some(match column {
         1 => DIM,
         2 => theme::advice_color(row.entry.advice),
+        3 if ui.relaunched.contains(&row.name) => AMBER,
         3 if running => TEXT,
         3 if by_app(ui, &row.name) => BLUE,
         3 | 4 if !running => DIM,
@@ -700,23 +713,9 @@ fn on_item_changed(hwnd: HWND, change: &NMLISTVIEW) {
         return;
     };
     if let Some(checked) = listview::check_change(change) {
-        // Toutes les lignes de la même entrée (services à numéro de version) suivent la case.
         let others = with_ui(|ui| {
-            let entry = ui.rows.get(index)?.entry;
-            ui.choices.set(entry, checked);
+            let others = check_row(ui, index, checked)?;
             let _ = state::save_choices(&ui.choices);
-            let mut others = Vec::new();
-            for (i, row) in ui.rows.iter_mut().enumerate() {
-                if std::ptr::eq(row.entry, entry) {
-                    row.checked = checked;
-                    if let Some(line) = ui.shown.get_mut(i) {
-                        line.checked = checked;
-                    }
-                    if i != index {
-                        others.push(i);
-                    }
-                }
-            }
             Some((ui.list, others))
         })
         .flatten();
@@ -732,6 +731,34 @@ fn on_item_changed(hwnd: HWND, change: &NMLISTVIEW) {
     if listview::selection_changed(change) {
         on_selection(hwnd);
     }
+}
+
+/// Coche ou décoche la ligne `index`, et avec elle toutes celles de la même entrée (services à
+/// numéro de version). Cocher n'arrête rien, même en mode jeu : le minuteur laisse tourner un
+/// service coché en cours jusqu'au prochain « Tout arrêter ». Renvoie les autres lignes de
+/// l'entrée, dont la case est à mettre à jour.
+fn check_row(ui: &mut Ui, index: usize, checked: bool) -> Option<Vec<usize>> {
+    let entry = ui.rows.get(index)?.entry;
+    ui.choices.set(entry, checked);
+    let game = ui.session.as_ref().filter(|s| s.game_mode);
+    let mut others = Vec::new();
+    for (i, row) in ui.rows.iter_mut().enumerate() {
+        if !std::ptr::eq(row.entry, entry) {
+            continue;
+        }
+        row.checked = checked;
+        if let Some(line) = ui.shown.get_mut(i) {
+            line.checked = checked;
+        }
+        let running = row.state.is_running();
+        if checked && running && game.is_some_and(|s| !s.stopped.contains(&row.name)) {
+            ui.allowed.insert(row.name.clone());
+        }
+        if i != index {
+            others.push(i);
+        }
+    }
+    Some(others)
 }
 
 fn on_selection(hwnd: HWND) {
@@ -899,19 +926,29 @@ fn on_stop_all(hwnd: HWND) {
         if ui.working != Working::Idle || !ui.elevated {
             return None;
         }
-        let mut chosen: Vec<&Row> = ui
-            .rows
-            .iter()
-            .filter(|r| r.checked && r.state.is_running())
-            .collect();
-        // Ordre du catalogue : un service avant ceux dont il dépend.
-        chosen.sort_by_key(|r| r.index);
-        Some(chosen.into_iter().map(|r| r.name.clone()).collect())
+        Some(stop_all_names(ui))
     })
     .flatten();
     if let Some(names) = names {
         launch(hwnd, Job::Stop { names, all: true });
     }
+}
+
+/// Ce qu'arrête « Tout arrêter » : les services cochés en cours, sauf ceux que Windows relance
+/// aussitôt ; dans l'ordre du catalogue, un service avant ceux dont il dépend.
+fn stop_all_names(ui: &Ui) -> Vec<String> {
+    let mut chosen: Vec<&Row> = ui
+        .rows
+        .iter()
+        .filter(|r| stoppable(ui, r) && r.state.is_running())
+        .collect();
+    chosen.sort_by_key(|r| r.index);
+    chosen.into_iter().map(|r| r.name.clone()).collect()
+}
+
+/// Coché, et pas relancé par Windows aussitôt arrêté : « Tout arrêter » l'arrête s'il tourne.
+fn stoppable(ui: &Ui, row: &Row) -> bool {
+    row.checked && !ui.relaunched.contains(&row.name)
 }
 
 fn on_start_all(hwnd: HWND) {
@@ -1023,6 +1060,8 @@ fn persist(session: Option<&Session>) {
 fn on_done(hwnd: HWND, done: Done) {
     let quit = with_ui(|ui| {
         ui.working = Working::Idle;
+        // Un arrêt ou une relance entre deux tours du minuteur : il repart de zéro.
+        ui.just_restopped.clear();
         match done {
             Done::Stopped {
                 all,
@@ -1035,6 +1074,7 @@ fn on_done(hwnd: HWND, done: Done) {
                     .get_or_insert_with(|| Session::new(state::now(), local_time()));
                 for name in stopped {
                     ui.allowed.remove(&name);
+                    ui.relaunched.remove(&name);
                     if !session.stopped.contains(&name) {
                         session.stopped.push(name);
                     }
@@ -1100,63 +1140,97 @@ fn on_done(hwnd: HWND, done: Done) {
 /// BITS ne tournent pas au moment du clic, puis démarrent en pleine partie). Ces derniers
 /// rejoignent la session : « Tout relancer » les relancera aussi. Rapide : la demande d'arrêt
 /// part sans attendre qu'il soit fait.
+///
+/// Un service arrêté à un tour qui tourne de nouveau au suivant, Windows le relance aussitôt
+/// arrêté : un autre service s'en sert. Le réarrêter toutes les 30 s ne servirait à rien et
+/// dérangerait ce service : il est laissé tourner (voir `Ui::relaunched`).
 fn watch(hwnd: HWND) {
-    let Some((keep, extra)) = read_ui(|ui| {
-        if ui.working != Working::Idle || !ui.elevated {
-            return None;
-        }
-        let session = ui.session.as_ref()?;
-        let keep: Vec<String> = session
-            .stopped
-            .iter()
-            .filter(|n| !ui.allowed.contains(*n))
-            .cloned()
-            .collect();
-        let mut extra: Vec<&Row> = if session.game_mode {
-            ui.rows
-                .iter()
-                .filter(|r| {
-                    r.checked && !session.stopped.contains(&r.name) && !ui.allowed.contains(&r.name)
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        extra.sort_by_key(|r| r.index);
-        Some((
-            keep,
-            extra
-                .into_iter()
-                .map(|r| r.name.clone())
-                .collect::<Vec<_>>(),
-        ))
-    })
-    .flatten() else {
-        return;
-    };
     let Ok(scm) = Scm::open() else {
         return;
     };
-    let stopped: Vec<String> = keep
+    let running: HashSet<String> = scm
+        .services()
         .into_iter()
-        .chain(extra)
+        .filter(|i| i.state.is_running())
+        .map(|i| i.name)
+        .collect();
+    let Some((to_stop, relaunched)) = read_ui(|ui| watch_plan(ui, &running)).flatten() else {
+        return;
+    };
+    let stopped: Vec<String> = to_stop
+        .into_iter()
         .filter(|name| services::request_stop(&scm, name))
         .collect();
-    if stopped.is_empty() {
-        return;
-    }
-    with_ui(|ui| {
-        ui.restopped += stopped.len();
-        if let Some(session) = ui.session.as_mut() {
-            for name in stopped {
-                if !session.stopped.contains(&name) {
-                    session.stopped.push(name);
-                }
-            }
+    let Some((changed, ended)) = with_ui(|ui| {
+        let (changed, ended) = after_watch(ui, stopped, relaunched);
+        if changed {
+            persist(ui.session.as_ref());
         }
-        persist(ui.session.as_ref());
-    });
-    refresh(hwnd);
+        (changed, ended)
+    }) else {
+        return;
+    };
+    if ended {
+        sync_controls(hwnd);
+    }
+    if changed {
+        refresh(hwnd);
+    }
+}
+
+/// Le tour du minuteur, d'après les services qui tournent (`running`) : ceux à arrêter de nouveau,
+/// dans l'ordre, et ceux que Windows a relancés depuis le tour précédent, qui les avait arrêtés :
+/// à laisser tourner. `None` : pas de tour (travail en cours, pas de session ou pas les droits).
+fn watch_plan(ui: &Ui, running: &HashSet<String>) -> Option<(Vec<String>, Vec<String>)> {
+    if ui.working != Working::Idle || !ui.elevated {
+        return None;
+    }
+    let session = ui.session.as_ref()?;
+    let watched = |name: &str| !ui.allowed.contains(name) && !ui.relaunched.contains(name);
+    let mut names: Vec<String> = session
+        .stopped
+        .iter()
+        .filter(|n| watched(n))
+        .cloned()
+        .collect();
+    if session.game_mode {
+        let mut extra: Vec<&Row> = ui
+            .rows
+            .iter()
+            .filter(|r| r.checked && !session.stopped.contains(&r.name) && watched(&r.name))
+            .collect();
+        extra.sort_by_key(|r| r.index);
+        names.extend(extra.into_iter().map(|r| r.name.clone()));
+    }
+    let (relaunched, to_stop): (Vec<String>, Vec<String>) = names
+        .into_iter()
+        .filter(|n| running.contains(n))
+        .partition(|n| ui.just_restopped.contains(n));
+    Some((to_stop, relaunched))
+}
+
+/// Ce que retient un tour du minuteur : `stopped`, arrêtés de nouveau ; `relaunched`, relancés
+/// aussitôt par Windows, laissés tourner et retirés de la session. Renvoie : quelque chose a
+/// changé, et la session se termine faute de service à relancer.
+fn after_watch(ui: &mut Ui, stopped: Vec<String>, relaunched: Vec<String>) -> (bool, bool) {
+    let changed = !stopped.is_empty() || !relaunched.is_empty();
+    ui.restopped += stopped.len();
+    ui.just_restopped = stopped.iter().cloned().collect();
+    let Some(session) = ui.session.as_mut() else {
+        return (changed, false);
+    };
+    session.stopped.retain(|n| !relaunched.contains(n));
+    for name in stopped {
+        if !session.stopped.contains(&name) {
+            session.stopped.push(name);
+        }
+    }
+    let ended = session.stopped.is_empty() && !session.game_mode;
+    ui.relaunched.extend(relaunched);
+    if ended {
+        ui.session = None;
+    }
+    (changed, ended)
 }
 
 /// Fin de la session Windows (déconnexion, arrêt, redémarrage) : relance tout de suite les
@@ -1453,6 +1527,16 @@ fn state_line(ui: &Ui, row: &Row) -> (String, COLORREF) {
             format!("Windows a refusé de le relancer : {why}. Un redémarrage s'en chargera.");
         return (text, AMBER);
     }
+    if ui.relaunched.contains(&row.name) {
+        let advice = if row.checked {
+            " Mieux vaut le décocher."
+        } else {
+            ""
+        };
+        let text =
+            format!("Windows le relance aussitôt arrêté : un autre service s'en sert.{advice}");
+        return (text, AMBER);
+    }
     match row.ram {
         _ if !row.state.is_running() && by_app(ui, &row.name) => (
             "Arrêté par GameBooster : « Relancer » ou « Tout relancer » le remet en marche.".into(),
@@ -1520,16 +1604,14 @@ fn status(ui: &Ui) -> (String, String) {
         }
         Working::Idle => {}
     }
-    let running = ui.rows.iter().filter(|r| r.state.is_running()).count();
-    let summary = format!(
-        "{} · ≈ {} libérables",
-        running_text(running),
-        memory::format(freeable(ui))
-    );
     if !ui.elevated {
+        let text = preview(ui, false).unwrap_or_default();
         return (
             "Lecture seule".into(),
-            format!("{summary}. Relance GameBooster en administrateur pour les arrêter."),
+            sentences(
+                &text,
+                "Relance GameBooster en administrateur pour arrêter des services.",
+            ),
         );
     }
     let (title, mut detail) = match &ui.session {
@@ -1561,20 +1643,17 @@ fn status(ui: &Ui) -> (String, String) {
                 memory::format(session.freed)
             ),
         ),
-        None => (
-            "Mode jeu inactif".to_string(),
-            format!("{summary} avec « Tout arrêter »."),
-        ),
+        None => ("Mode jeu inactif".to_string(), String::new()),
     };
     if !ui.refused.is_empty() {
-        detail = format!(
-            "{} {} : sélectionne-les pour voir pourquoi.",
-            detail,
-            count(
-                ui.refused.len(),
-                "service refusé par Windows",
-                "services refusés par Windows"
-            )
+        let refused = count(
+            ui.refused.len(),
+            "service refusé par Windows",
+            "services refusés par Windows",
+        );
+        detail = sentences(
+            &detail,
+            &format!("{refused} : sélectionne-les pour voir pourquoi."),
         );
     }
     if !ui.failed.is_empty() {
@@ -1587,6 +1666,10 @@ fn status(ui: &Ui) -> (String, String) {
     if let Some(note) = &ui.note {
         detail.clone_from(note);
     }
+    // Toujours en dernier : suit les cases à mesure qu'on les coche.
+    if let Some(text) = preview(ui, ui.session.is_some()) {
+        detail = sentences(&detail, &text);
+    }
     (title, detail)
 }
 
@@ -1595,17 +1678,43 @@ fn freeable(ui: &Ui) -> u64 {
     let chosen: HashSet<&str> = ui
         .rows
         .iter()
-        .filter(|r| r.checked)
+        .filter(|r| stoppable(ui, r))
         .map(|r| r.name.as_str())
         .collect();
     model::freeable(&ui.infos, &ui.ram, &chosen)
 }
 
-fn running_text(n: usize) -> String {
-    match n {
-        0 => "Aucun service inutile ne tourne".into(),
-        1 => "1 service inutile tourne".into(),
-        n => format!("{n} services inutiles tournent"),
+/// Ce que libérerait « Tout arrêter » avec les cases cochées : la RAM des services cochés en
+/// cours. `more` : des services sont déjà arrêtés, ce serait en plus ; rien alors si aucun
+/// service coché ne tourne.
+fn preview(ui: &Ui, more: bool) -> Option<String> {
+    let running = ui
+        .rows
+        .iter()
+        .filter(|r| stoppable(ui, r) && r.state.is_running())
+        .count();
+    match (running, more) {
+        (0, true) => None,
+        (0, false) => Some("Aucun service coché ne tourne en ce moment.".into()),
+        _ => Some(format!(
+            "« Tout arrêter » libérerait ≈ {}{} ({}).",
+            memory::format(freeable(ui)),
+            if more { " de plus" } else { "" },
+            count(
+                running,
+                "service coché en cours",
+                "services cochés en cours"
+            )
+        )),
+    }
+}
+
+/// Deux phrases à la suite ; la seconde seule si la première est vide.
+fn sentences(first: &str, second: &str) -> String {
+    if first.is_empty() {
+        second.to_string()
+    } else {
+        format!("{first} {second}")
     }
 }
 
@@ -1690,8 +1799,6 @@ mod tests {
             count(2, "service arrêté", "services arrêtés"),
             "2 services arrêtés"
         );
-        assert_eq!(running_text(0), "Aucun service inutile ne tourne");
-        assert_eq!(running_text(14), "14 services inutiles tournent");
     }
 
     fn sample() -> Ui {
@@ -1739,6 +1846,8 @@ mod tests {
             refused: Vec::new(),
             failed: Vec::new(),
             restopped: 0,
+            just_restopped: HashSet::new(),
+            relaunched: HashSet::new(),
             note: None,
             quit_after: false,
         }
@@ -1752,9 +1861,13 @@ mod tests {
             status(&ui),
             (
                 "Mode jeu inactif".into(),
-                "2 services inutiles tournent · ≈ 30 Mo libérables avec « Tout arrêter ».".into()
+                "« Tout arrêter » libérerait ≈ 30 Mo (1 service coché en cours).".into()
             )
         );
+        // « Tout arrêter » a arrêté Windows Update : rien de plus à libérer.
+        ui.infos[0].state = State::Stopped;
+        ui.infos[0].pid = 0;
+        ui.rows = model::rows(&ui.infos, &ui.ram, &ui.choices);
         ui.session = Some(Session {
             since: 0,
             since_text: "14 h 32".into(),
@@ -1770,11 +1883,59 @@ mod tests {
                 "1 service arrêté · ≈ 30 Mo libérés · 2 démarrés par Windows, arrêtés.".into()
             )
         );
+        // Le spouleur coché en plus : ce que « Tout arrêter » libérerait encore.
+        ui.rows[1].checked = true;
+        assert_eq!(
+            status(&ui).1,
+            "1 service arrêté · ≈ 30 Mo libérés · 2 démarrés par Windows, arrêtés. \
+             « Tout arrêter » libérerait ≈ 8,0 Mo de plus (1 service coché en cours)."
+        );
         ui.working = Working::Starting;
         assert_eq!(status(&ui).0, "Relance en cours…");
+
+        // Après « Tout relancer », le message ne cache pas ce que libérerait le prochain arrêt.
+        let mut ui = sample();
+        ui.note = Some("Mode jeu terminé : 1 service relancé.".into());
+        assert_eq!(
+            status(&ui).1,
+            "Mode jeu terminé : 1 service relancé. \
+             « Tout arrêter » libérerait ≈ 30 Mo (1 service coché en cours)."
+        );
+        ui.note = None;
+        ui.rows[0].checked = false;
+        assert_eq!(status(&ui).1, "Aucun service coché ne tourne en ce moment.");
+
         let mut ui = sample();
         ui.elevated = false;
-        assert_eq!(status(&ui).0, "Lecture seule");
+        assert_eq!(
+            status(&ui),
+            (
+                "Lecture seule".into(),
+                "« Tout arrêter » libérerait ≈ 30 Mo (1 service coché en cours). \
+                 Relance GameBooster en administrateur pour arrêter des services."
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn checking_never_stops_a_service() {
+        let mut ui = sample();
+        // Hors mode jeu, la case prépare seulement « Tout arrêter ».
+        assert_eq!(check_row(&mut ui, 1, true), Some(Vec::new()));
+        assert!(ui.rows[1].checked && ui.allowed.is_empty());
+        check_row(&mut ui, 1, false);
+        // En mode jeu, le minuteur laisse tourner le spouleur, coché alors qu'il tourne…
+        let mut session = Session::new(0, String::new());
+        session.game_mode = true;
+        ui.session = Some(session);
+        check_row(&mut ui, 1, true);
+        assert!(ui.allowed.contains("Spooler"));
+        // … mais arrêtera Windows Update, coché arrêté, si Windows le démarre.
+        ui.rows[0].state = State::Stopped;
+        check_row(&mut ui, 0, false);
+        check_row(&mut ui, 0, true);
+        assert!(!ui.allowed.contains("wuauserv"));
     }
 
     #[test]
@@ -1802,6 +1963,50 @@ mod tests {
         assert_eq!(
             state_line(&ui, &row).0,
             "Windows a refusé de l'arrêter : accès refusé par Windows."
+        );
+    }
+
+    #[test]
+    fn watcher_leaves_what_windows_relaunches_at_once() {
+        let mut ui = sample();
+        let mut session = Session::new(0, String::new());
+        session.stopped.push("Spooler".into());
+        ui.session = Some(session);
+        let running = HashSet::from(["wuauserv".to_string(), "Spooler".to_string()]);
+        // Le spouleur, arrêté par GameBooster, tourne de nouveau : le minuteur l'arrête.
+        let plan = watch_plan(&ui, &running);
+        assert_eq!(plan, Some((vec!["Spooler".to_string()], Vec::new())));
+        assert_eq!(
+            after_watch(&mut ui, vec!["Spooler".into()], Vec::new()),
+            (true, false)
+        );
+        // Revenu dès le tour suivant : Windows le relance aussitôt. Il est laissé tourner, et la
+        // session, sans plus rien à relancer, se termine.
+        let plan = watch_plan(&ui, &running);
+        assert_eq!(plan, Some((Vec::new(), vec!["Spooler".to_string()])));
+        assert_eq!(
+            after_watch(&mut ui, Vec::new(), vec!["Spooler".into()]),
+            (true, true)
+        );
+        assert!(ui.session.is_none() && ui.relaunched.contains("Spooler"));
+
+        // Coché, il reste en dehors de « Tout arrêter », de son estimation et du minuteur ; son
+        // détail l'explique.
+        ui.rows[1].checked = true;
+        let mut session = Session::new(0, String::new());
+        session.game_mode = true;
+        ui.session = Some(session);
+        assert_eq!(stop_all_names(&ui), ["wuauserv"]);
+        assert!(status(&ui)
+            .1
+            .ends_with("≈ 30 Mo de plus (1 service coché en cours)."));
+        let plan = watch_plan(&ui, &running);
+        assert_eq!(plan, Some((vec!["wuauserv".to_string()], Vec::new())));
+        let printer = ui.rows[1].clone();
+        assert_eq!(
+            state_line(&ui, &printer).0,
+            "Windows le relance aussitôt arrêté : un autre service s'en sert. \
+             Mieux vaut le décocher."
         );
     }
 }

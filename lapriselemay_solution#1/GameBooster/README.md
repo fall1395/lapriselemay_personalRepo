@@ -21,7 +21,8 @@ Il consomme le moins possible :
 1. Copier `GameBooster.exe` sur le PC de jeu (n'importe quel dossier).
 2. Le lancer : Windows demande les droits administrateur (sans eux, il refuse d'arrêter ses services).
 3. Cocher les services à inclure dans « Tout arrêter » : les services *sans risque* le sont déjà.
-   Les cases sont retenues d'un lancement à l'autre.
+   Les cases sont retenues d'un lancement à l'autre. Cocher un service ne l'arrête pas : en haut à
+   droite, GameBooster indique la RAM que « Tout arrêter » libérerait avec les cases cochées.
 4. **Tout arrêter** avant de lancer le jeu, **Tout relancer** après.
 
 Pour un seul service : le sélectionner, puis **Arrêter** (ou **Relancer**) dans le panneau du bas, ou
@@ -38,7 +39,13 @@ toutes les 30 s, il arrête les services cochés que Windows a démarrés ou rel
 beaucoup de PC, Windows Update, BITS ou l'Optimisation de la distribution ne tournent pas au moment
 du clic, puis démarrent d'eux-mêmes en pleine partie. « Tout relancer » les relance aussi.
 
-Un service relancé à la main pendant le mode jeu est laissé tranquille jusqu'à « Tout relancer ».
+Un service relancé à la main pendant le mode jeu, ou coché alors qu'il tourne, est laissé
+tranquille jusqu'au prochain « Tout arrêter ».
+
+Un service que Windows relance aussitôt arrêté (un autre service s'en sert, comme ICS pour le
+réseau de WSL 2) est laissé tourner après deux essais, même par « Tout arrêter », jusqu'à la
+fermeture de GameBooster : son état passe en orange et son détail l'explique. Mieux vaut alors le
+décocher.
 
 ### La RAM affichée
 
