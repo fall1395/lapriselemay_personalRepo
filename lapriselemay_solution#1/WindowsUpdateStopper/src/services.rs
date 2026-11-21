@@ -4,6 +4,7 @@
 //! Windows Update Stopper ne change jamais le type de démarrage d'un service : il l'arrête, c'est tout. Si
 //! Windows redémarre, tout revient donc à la normale de soi-même.
 
+use std::collections::HashSet;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -119,6 +120,21 @@ impl Scm {
     /// processus qui les héberge.
     pub fn services(&self) -> Vec<Info> {
         self.services_with(8 * 1024)
+    }
+
+    /// Parmi `names`, ceux qui tournent. Ne lit que ces services : bien plus léger que
+    /// `services`, pour le minuteur du mode jeu.
+    pub fn running(&self, names: &[String]) -> HashSet<String> {
+        names
+            .iter()
+            .filter(|name| {
+                self.service(name, SERVICE_QUERY_STATUS)
+                    .ok()
+                    .and_then(|service| current_state(&service))
+                    .is_some_and(State::is_running)
+            })
+            .cloned()
+            .collect()
     }
 
     /// `services`, avec un tampon de départ de `words` × 8 octets (agrandi s'il le faut).
@@ -414,6 +430,9 @@ mod tests {
         assert!(scm
             .description("wuauserv")
             .is_some_and(|d| d.chars().count() > 20));
+        // Le minuteur ne lit que les services qu'il surveille : RpcSs tourne toujours.
+        let watched = ["RpcSs".to_string(), "PasUnService".to_string()];
+        assert_eq!(scm.running(&watched), HashSet::from(["RpcSs".to_string()]));
     }
 
     /// Sur le vrai Windows : dans le catalogue, un service passe avant ceux dont il dépend.

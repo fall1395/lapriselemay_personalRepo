@@ -36,16 +36,20 @@ ce qu'on perd, la RAM qu'il occupe et la description de Windows.
 ### Mode jeu
 
 « Tout arrêter » passe en mode jeu. Laisser Windows Update Stopper ouvert (réduit dans la barre des tâches) :
-toutes les 30 s, il arrête les services cochés que Windows a démarrés ou relancés entre-temps.
+toutes les 5 s, il arrête les services cochés que Windows a démarrés ou relancés entre-temps ;
+fenêtre ouverte, il les arrête même dès que la liste en voit un. En haut à droite, il note le
+dernier, avec l'heure : « BITS relancé par Windows à 14 h 32 : arrêté de nouveau. » Chaque
+vérification ne lit que l'état de ces services : un quart de milliseconde, dix fois moins que la
+mise à jour de la liste quand la fenêtre est ouverte.
 Windows relance volontiers Windows Update de lui-même, pour une recherche planifiée ou à la demande
 d'une appli : tout programme a le droit de le démarrer. « Tout relancer » les relance aussi.
 
 Un service relancé à la main pendant le mode jeu, ou coché alors qu'il tourne, est laissé
 tranquille jusqu'au prochain « Tout arrêter ».
 
-Un service que Windows relance aussitôt arrêté (un autre service s'en sert) est laissé tourner
-après deux essais, même par « Tout arrêter », jusqu'à la fermeture de Windows Update Stopper : son état passe
-en orange et son détail l'explique. Mieux vaut alors le décocher.
+Un service que Windows relance sans arrêt (arrêté 3 fois en 2 minutes, il tourne encore) est
+laissé tourner, même par « Tout arrêter », jusqu'à la fermeture de Windows Update Stopper : son état
+passe en orange et son détail l'explique. Mieux vaut alors le décocher.
 
 ### La RAM affichée
 

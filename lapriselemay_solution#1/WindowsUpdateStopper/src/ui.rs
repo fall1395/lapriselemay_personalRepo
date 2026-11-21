@@ -6,14 +6,15 @@
 //! Arrêter ou relancer des services prend quelques secondes : c'est fait dans un fil à part, pour
 //! que la fenêtre reste réactive, et les boutons sont grisés pendant ce temps. La liste se met à
 //! jour toutes les 3 s (sauf fenêtre réduite). En mode jeu, un minuteur arrête aussi, toutes les
-//! 30 s, les services cochés que Windows a démarrés ou relancés entre-temps ; mais pas ceux que
-//! Windows relance aussitôt arrêtés : il les laisse tourner.
+//! 5 s, même fenêtre réduite, les services cochés que Windows a démarrés ou relancés ; la liste
+//! les arrête même dès qu'elle en voit un. Mais pas ceux que Windows relance sans arrêt : il les
+//! laisse tourner.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -59,9 +60,18 @@ const WM_APP_SHOW: u32 = WM_APP + 2;
 /// Mise à jour de la liste.
 const REFRESH_TIMER: usize = 1;
 const REFRESH_MS: u32 = 3_000;
-/// Services arrêtés gardés arrêtés (et, en mode jeu, cochés arrêtés), tant qu'il y en a.
+/// Services arrêtés gardés arrêtés (et, en mode jeu, cochés arrêtés), tant qu'il y en a. Même
+/// fenêtre réduite : il ne lit que l'état de ces services, un quart de milliseconde (la mise à
+/// jour de la liste, fenêtre ouverte, en prend dix fois plus).
 const WATCH_TIMER: usize = 2;
-const WATCH_MS: u32 = 30_000;
+const WATCH_MS: u32 = 5_000;
+/// Après une demande d'arrêt, le temps que le service s'arrête : encore en cours avant, ce n'est
+/// pas une relance de Windows.
+const STOP_GRACE: Duration = Duration::from_secs(3);
+/// Arrêté autant de fois en si peu de temps, puis relancé encore : Windows insiste, le service
+/// est laissé tourner (voir `Ui::relaunched`).
+const RESTOP_LIMIT: usize = 3;
+const RESTOP_WINDOW: Duration = Duration::from_secs(120);
 
 /// Fenêtre redimensionnable. WS_CLIPCHILDREN : dessiner le fond n'efface pas les contrôles.
 const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | WS_CLIPCHILDREN.0);
@@ -93,6 +103,17 @@ enum Working {
 
 /// Un service que Windows a refusé d'arrêter ou de relancer : son nom, la raison.
 type Issue = (String, String);
+
+/// Les arrêts, par le minuteur, d'un service que Windows a démarré ou relancé.
+#[derive(Clone, Debug, Default)]
+struct Restops {
+    /// Les derniers (au plus `RESTOP_LIMIT`), pour reconnaître un Windows qui insiste.
+    recent: Vec<Instant>,
+    /// L'heure locale du dernier, prête à afficher : « 14 h 32 »…
+    clock: String,
+    /// … et si l'appli l'avait déjà arrêté : Windows l'a alors relancé, et non démarré.
+    was_stopped: bool,
+}
 
 /// Travail du fil d'arrière-plan. `all` : « Tout arrêter » ou « Tout relancer ».
 enum Job {
@@ -145,14 +166,14 @@ struct Ui {
     allowed: HashSet<String>,
     refused: Vec<Issue>,
     failed: Vec<Issue>,
-    /// Démarrés par Windows pendant la session, puis arrêtés par le minuteur.
+    /// Démarrés par Windows pendant la session, puis arrêtés par le minuteur : combien de fois…
     restopped: usize,
-    /// Arrêtés de nouveau par le minuteur à son dernier tour : s'ils tournent encore au suivant,
-    /// Windows les relance aussitôt arrêtés.
-    just_restopped: HashSet<String>,
-    /// Relancés par Windows aussitôt arrêtés : un autre service s'en sert (ICS pour le réseau de
-    /// WSL 2, par exemple). Le minuteur et « Tout arrêter » les laissent tourner jusqu'à la
-    /// fermeture de Windows Update Stopper, ou jusqu'à ce qu'on les arrête un à un.
+    /// … et, service par service, quand.
+    restops: HashMap<String, Restops>,
+    /// Relancés par Windows sans arrêt : arrêtés `RESTOP_LIMIT` fois en `RESTOP_WINDOW`, ils
+    /// tournent encore (un autre service s'en sert, par exemple). Le minuteur et « Tout arrêter »
+    /// les laissent tourner jusqu'à la fermeture de Windows Update Stopper, ou jusqu'à ce qu'on
+    /// les arrête un à un.
     relaunched: HashSet<String>,
     note: Option<String>,
     /// Fermer Windows Update Stopper dès les services relancés.
@@ -261,7 +282,7 @@ pub fn run() {
                 refused: Vec::new(),
                 failed: Vec::new(),
                 restopped: 0,
-                just_restopped: HashSet::new(),
+                restops: HashMap::new(),
                 relaunched: HashSet::new(),
                 note: None,
                 quit_after: false,
@@ -533,6 +554,11 @@ fn refresh(hwnd: HWND) {
     FILLING.set(false);
     update_one_button(hwnd);
     invalidate(hwnd);
+    // Un service que l'appli garde arrêté tourne de nouveau : arrêté tout de suite, sans attendre
+    // le minuteur. Dans le même message : la liste n'a pas le temps d'afficher « En cours ».
+    if read_ui(|ui| needs_watch(ui, Instant::now())).unwrap_or(false) {
+        watch(hwnd);
+    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -908,7 +934,7 @@ fn on_stop_all(hwnd: HWND) {
 }
 
 /// Ce qu'arrête « Tout arrêter » : les services cochés en cours, sauf ceux que Windows relance
-/// aussitôt ; dans l'ordre du catalogue, un service avant ceux dont il dépend.
+/// sans arrêt ; dans l'ordre du catalogue, un service avant ceux dont il dépend.
 fn stop_all_names(ui: &Ui) -> Vec<String> {
     let mut chosen: Vec<&Row> = ui
         .rows
@@ -919,7 +945,7 @@ fn stop_all_names(ui: &Ui) -> Vec<String> {
     chosen.into_iter().map(|r| r.name.clone()).collect()
 }
 
-/// Coché, et pas relancé par Windows aussitôt arrêté : « Tout arrêter » l'arrête s'il tourne.
+/// Coché, et pas relancé par Windows sans arrêt : « Tout arrêter » l'arrête s'il tourne.
 fn stoppable(ui: &Ui, row: &Row) -> bool {
     row.checked && !ui.relaunched.contains(&row.name)
 }
@@ -1033,8 +1059,6 @@ fn persist(session: Option<&Session>) {
 fn on_done(hwnd: HWND, done: Done) {
     let quit = with_ui(|ui| {
         ui.working = Working::Idle;
-        // Un arrêt ou une relance entre deux tours du minuteur : il repart de zéro.
-        ui.just_restopped.clear();
         match done {
             Done::Stopped {
                 all,
@@ -1048,6 +1072,8 @@ fn on_done(hwnd: HWND, done: Done) {
                 for name in stopped {
                     ui.allowed.remove(&name);
                     ui.relaunched.remove(&name);
+                    // Arrêté à la main : le minuteur repart de zéro pour lui.
+                    ui.restops.remove(&name);
                     if !session.stopped.contains(&name) {
                         session.stopped.push(name);
                     }
@@ -1057,6 +1083,7 @@ fn on_done(hwnd: HWND, done: Done) {
                     session.game_mode = true;
                     ui.allowed.clear();
                     ui.restopped = 0;
+                    ui.restops.clear();
                 }
                 ui.refused = refused;
             }
@@ -1069,6 +1096,7 @@ fn on_done(hwnd: HWND, done: Done) {
                     ui.session = None;
                     ui.allowed.clear();
                     ui.restopped = 0;
+                    ui.restops.clear();
                     if failed.is_empty() {
                         ui.note = Some(format!(
                             "Mode jeu terminé : {}.",
@@ -1108,34 +1136,42 @@ fn on_done(hwnd: HWND, done: Done) {
     }
 }
 
-/// Toutes les 30 s pendant une session : arrête à nouveau les services que Windows a relancés
-/// et, en mode jeu, les services cochés qu'il a démarrés (sur beaucoup de PC, Windows Update ou
-/// BITS ne tournent pas au moment du clic, puis démarrent en pleine partie). Ces derniers
-/// rejoignent la session : « Tout relancer » les relancera aussi. Rapide : la demande d'arrêt
-/// part sans attendre qu'il soit fait.
+/// Toutes les 5 s pendant une session, même fenêtre réduite, et dès que la liste en voit un :
+/// arrête à nouveau les services que Windows a relancés et, en mode jeu, les services cochés qu'il
+/// a démarrés (sur beaucoup de PC, Windows Update ou BITS ne tournent pas au moment du clic, puis
+/// démarrent en pleine partie). Ces derniers rejoignent la session : « Tout relancer » les
+/// relancera aussi. Rapide : il ne lit que l'état de ces services, et la demande d'arrêt part
+/// sans attendre qu'il soit fait.
 ///
-/// Un service arrêté à un tour qui tourne de nouveau au suivant, Windows le relance aussitôt
-/// arrêté : un autre service s'en sert. Le réarrêter toutes les 30 s ne servirait à rien et
+/// Un service arrêté `RESTOP_LIMIT` fois en `RESTOP_WINDOW` qui tourne encore, Windows le relance
+/// sans arrêt : un autre service s'en sert, par exemple. L'arrêter encore ne servirait à rien et
 /// dérangerait ce service : il est laissé tourner (voir `Ui::relaunched`).
 fn watch(hwnd: HWND) {
+    let Some(names) = read_ui(watched).flatten() else {
+        return;
+    };
+    if names.is_empty() {
+        return;
+    }
     let Ok(scm) = Scm::open() else {
         return;
     };
-    let running: HashSet<String> = scm
-        .services()
-        .into_iter()
-        .filter(|i| i.state.is_running())
-        .map(|i| i.name)
-        .collect();
-    let Some((to_stop, relaunched)) = read_ui(|ui| watch_plan(ui, &running)).flatten() else {
+    let running = scm.running(&names);
+    let now = Instant::now();
+    let plan = read_ui(|ui| watch_plan(ui, |name| running.contains(name), now)).flatten();
+    let Some((to_stop, insistent)) = plan else {
         return;
     };
+    if to_stop.is_empty() && insistent.is_empty() {
+        return;
+    }
     let stopped: Vec<String> = to_stop
         .into_iter()
         .filter(|name| services::request_stop(&scm, name))
         .collect();
+    let clock = local_time();
     let Some((changed, ended)) = with_ui(|ui| {
-        let (changed, ended) = after_watch(ui, stopped, relaunched);
+        let (changed, ended) = after_watch(ui, stopped, insistent, now, &clock);
         if changed {
             persist(ui.session.as_ref());
         }
@@ -1151,10 +1187,11 @@ fn watch(hwnd: HWND) {
     }
 }
 
-/// Le tour du minuteur, d'après les services qui tournent (`running`) : ceux à arrêter de nouveau,
-/// dans l'ordre, et ceux que Windows a relancés depuis le tour précédent, qui les avait arrêtés :
-/// à laisser tourner. `None` : pas de tour (travail en cours, pas de session ou pas les droits).
-fn watch_plan(ui: &Ui, running: &HashSet<String>) -> Option<(Vec<String>, Vec<String>)> {
+/// Les services que surveille le minuteur : ceux arrêtés pendant la session, dans l'ordre, puis,
+/// en mode jeu, les autres services cochés, dans l'ordre du catalogue ; sauf ceux démarrés à la
+/// main et ceux que Windows relance sans arrêt. `None` : pas de tour (travail en cours, pas de
+/// session ou pas les droits).
+fn watched(ui: &Ui) -> Option<Vec<String>> {
     if ui.working != Working::Idle || !ui.elevated {
         return None;
     }
@@ -1175,31 +1212,83 @@ fn watch_plan(ui: &Ui, running: &HashSet<String>) -> Option<(Vec<String>, Vec<St
         extra.sort_by_key(|r| r.index);
         names.extend(extra.into_iter().map(|r| r.name.clone()));
     }
-    let (relaunched, to_stop): (Vec<String>, Vec<String>) = names
-        .into_iter()
-        .filter(|n| running.contains(n))
-        .partition(|n| ui.just_restopped.contains(n));
-    Some((to_stop, relaunched))
+    Some(names)
 }
 
-/// Ce que retient un tour du minuteur : `stopped`, arrêtés de nouveau ; `relaunched`, relancés
-/// aussitôt par Windows, laissés tourner et retirés de la session. Renvoie : quelque chose a
-/// changé, et la session se termine faute de service à relancer.
-fn after_watch(ui: &mut Ui, stopped: Vec<String>, relaunched: Vec<String>) -> (bool, bool) {
-    let changed = !stopped.is_empty() || !relaunched.is_empty();
+/// Le tour du minuteur à l'instant `now`, d'après les services qui tournent (`running`) : ceux à
+/// arrêter de nouveau, dans l'ordre, et ceux que Windows relance sans arrêt, à laisser tourner.
+/// Un service dont l'arrêt vient d'être demandé n'est ni l'un ni l'autre : il s'arrête.
+fn watch_plan(
+    ui: &Ui,
+    running: impl Fn(&str) -> bool,
+    now: Instant,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let age = |at: &Instant| now.saturating_duration_since(*at);
+    let mut to_stop = Vec::new();
+    let mut insistent = Vec::new();
+    for name in watched(ui)?.into_iter().filter(|n| running(n.as_str())) {
+        let recent = ui
+            .restops
+            .get(&name)
+            .map(|r| r.recent.as_slice())
+            .unwrap_or_default();
+        if recent.last().is_some_and(|at| age(at) < STOP_GRACE) {
+            continue;
+        }
+        if recent.iter().filter(|at| age(at) < RESTOP_WINDOW).count() >= RESTOP_LIMIT {
+            insistent.push(name);
+        } else {
+            to_stop.push(name);
+        }
+    }
+    Some((to_stop, insistent))
+}
+
+/// Vrai si la dernière lecture de la liste montre un service à arrêter de nouveau, ou que Windows
+/// relance sans arrêt : le minuteur a du travail, sans attendre son tour.
+fn needs_watch(ui: &Ui, now: Instant) -> bool {
+    let running = |name: &str| {
+        ui.rows
+            .iter()
+            .any(|r| r.name == name && r.state.is_running())
+    };
+    watch_plan(ui, running, now)
+        .is_some_and(|(to_stop, insistent)| !to_stop.is_empty() || !insistent.is_empty())
+}
+
+/// Ce que retient un tour du minuteur, à l'instant `now` (`clock` : l'heure locale) : `stopped`,
+/// arrêtés de nouveau ; `insistent`, relancés sans arrêt par Windows, laissés tourner et retirés
+/// de la session. Renvoie : quelque chose a changé, et la session se termine faute de service à
+/// relancer.
+fn after_watch(
+    ui: &mut Ui,
+    stopped: Vec<String>,
+    insistent: Vec<String>,
+    now: Instant,
+    clock: &str,
+) -> (bool, bool) {
+    let changed = !stopped.is_empty() || !insistent.is_empty();
     ui.restopped += stopped.len();
-    ui.just_restopped = stopped.iter().cloned().collect();
     let Some(session) = ui.session.as_mut() else {
         return (changed, false);
     };
-    session.stopped.retain(|n| !relaunched.contains(n));
+    for name in &stopped {
+        let restops = ui.restops.entry(name.clone()).or_default();
+        restops.recent.push(now);
+        if restops.recent.len() > RESTOP_LIMIT {
+            restops.recent.remove(0);
+        }
+        restops.clock = clock.to_string();
+        restops.was_stopped = session.stopped.contains(name);
+    }
+    session.stopped.retain(|n| !insistent.contains(n));
     for name in stopped {
         if !session.stopped.contains(&name) {
             session.stopped.push(name);
         }
     }
     let ended = session.stopped.is_empty() && !session.game_mode;
-    ui.relaunched.extend(relaunched);
+    ui.relaunched.extend(insistent);
     if ended {
         ui.session = None;
     }
@@ -1498,15 +1587,13 @@ fn state_line(ui: &Ui, row: &Row) -> (String, COLORREF) {
         } else {
             ""
         };
-        let text =
-            format!("Windows le relance aussitôt arrêté : un autre service s'en sert.{hint}");
+        let text = format!("Windows le relance sans arrêt : l'appli le laisse tourner.{hint}");
         return (text, AMBER);
     }
     match row.ram {
-        _ if !row.state.is_running() && by_app(ui, &row.name) => (
-            "Arrêté par l'appli : « Relancer » ou « Tout relancer » le remet en marche.".into(),
-            BLUE,
-        ),
+        _ if !row.state.is_running() && by_app(ui, &row.name) => {
+            (stopped_line(ui, &row.name), BLUE)
+        }
         _ if !row.state.is_running() => (format!("{}.", row.state.label()), DIM),
         Ram::Own(bytes) => (
             format!("{} · occupe {} de RAM.", row.state.label(), memory::format(bytes)),
@@ -1580,23 +1667,14 @@ fn status(ui: &Ui) -> (String, String) {
         );
     }
     let (title, mut detail) = match &ui.session {
-        Some(session) if session.game_mode => {
-            let mut parts = vec![
+        Some(session) if session.game_mode => (
+            format!("Mode jeu actif depuis {}", session.since_text),
+            format!(
+                "{} · ≈ {} libérés.",
                 count(session.stopped.len(), "service arrêté", "services arrêtés"),
-                format!("≈ {} libérés", memory::format(session.freed)),
-            ];
-            if ui.restopped > 0 {
-                parts.push(count(
-                    ui.restopped,
-                    "démarré par Windows, arrêté",
-                    "démarrés par Windows, arrêtés",
-                ));
-            }
-            (
-                format!("Mode jeu actif depuis {}", session.since_text),
-                parts.join(" · ") + ".",
-            )
-        }
+                memory::format(session.freed)
+            ),
+        ),
         Some(session) => (
             count(session.stopped.len(), "service arrêté", "services arrêtés"),
             format!(
@@ -1606,6 +1684,9 @@ fn status(ui: &Ui) -> (String, String) {
         ),
         None => ("Mode jeu inactif".to_string(), String::new()),
     };
+    if let Some(text) = last_restop(ui) {
+        detail = sentences(&detail, &text);
+    }
     if !ui.refused.is_empty() {
         let refused = count(
             ui.refused.len(),
@@ -1632,6 +1713,53 @@ fn status(ui: &Ui) -> (String, String) {
         detail = sentences(&detail, &text);
     }
     (title, detail)
+}
+
+/// Le dernier service que Windows a démarré ou relancé et que le minuteur a arrêté, pour le haut
+/// de la fenêtre : « BITS relancé par Windows à 14 h 32 : arrêté de nouveau (3 en tout). »
+fn last_restop(ui: &Ui) -> Option<String> {
+    // Hors session, rien à dire.
+    ui.session.as_ref()?;
+    let (_, name, last) = ui
+        .restops
+        .iter()
+        .filter_map(|(name, r)| Some((*r.recent.last()?, name, r)))
+        .max_by_key(|&(at, name, _)| (at, name))?;
+    let event = if last.was_stopped {
+        format!(
+            "{name} relancé par Windows à {} : arrêté de nouveau",
+            last.clock
+        )
+    } else {
+        format!(
+            "{name} démarré par Windows à {} : arrêté aussitôt",
+            last.clock
+        )
+    };
+    let total = if ui.restopped > 1 {
+        format!(" ({} en tout)", ui.restopped)
+    } else {
+        String::new()
+    };
+    Some(format!("{event}{total}."))
+}
+
+/// Le détail d'un service arrêté par l'appli : Windows l'a-t-il relancé depuis ?
+fn stopped_line(ui: &Ui, name: &str) -> String {
+    let again = "« Relancer » le remet en marche.";
+    match ui.restops.get(name) {
+        Some(r) if r.was_stopped => {
+            format!(
+                "Relancé par Windows à {}, arrêté de nouveau : {again}",
+                r.clock
+            )
+        }
+        Some(r) => format!(
+            "Démarré par Windows à {}, arrêté aussitôt : {again}",
+            r.clock
+        ),
+        None => "Arrêté par l'appli : « Relancer » ou « Tout relancer » le remet en marche.".into(),
+    }
 }
 
 /// RAM que libérerait « Tout arrêter », d'après les cases cochées.
@@ -1811,7 +1939,7 @@ mod tests {
             refused: Vec::new(),
             failed: Vec::new(),
             restopped: 0,
-            just_restopped: HashSet::new(),
+            restops: HashMap::new(),
             relaunched: HashSet::new(),
             note: None,
             quit_after: false,
@@ -1840,19 +1968,35 @@ mod tests {
             stopped: vec!["wuauserv".into()],
             freed: 30 << 20,
         });
-        ui.restopped = 2;
         assert_eq!(
             status(&ui),
             (
                 "Mode jeu actif depuis 14 h 32".into(),
-                "1 service arrêté · ≈ 30 Mo libérés · 2 démarrés par Windows, arrêtés.".into()
+                "1 service arrêté · ≈ 30 Mo libérés.".into()
             )
+        );
+        // Windows a relancé Windows Update deux fois : le minuteur l'a arrêté, et le dit.
+        let now = Instant::now();
+        after_watch(&mut ui, vec!["wuauserv".into()], Vec::new(), now, "14 h 40");
+        let later = now + Duration::from_secs(60);
+        after_watch(
+            &mut ui,
+            vec!["wuauserv".into()],
+            Vec::new(),
+            later,
+            "14 h 41",
+        );
+        assert_eq!(
+            status(&ui).1,
+            "1 service arrêté · ≈ 30 Mo libérés. \
+             wuauserv relancé par Windows à 14 h 41 : arrêté de nouveau (2 en tout)."
         );
         // BITS coché en plus : ce que « Tout arrêter » libérerait encore.
         ui.rows[1].checked = true;
         assert_eq!(
             status(&ui).1,
-            "1 service arrêté · ≈ 30 Mo libérés · 2 démarrés par Windows, arrêtés. \
+            "1 service arrêté · ≈ 30 Mo libérés. \
+             wuauserv relancé par Windows à 14 h 41 : arrêté de nouveau (2 en tout). \
              « Tout arrêter » libérerait ≈ 8,0 Mo de plus (1 service coché en cours)."
         );
         ui.working = Working::Starting;
@@ -1932,25 +2076,50 @@ mod tests {
     }
 
     #[test]
-    fn watcher_leaves_what_windows_relaunches_at_once() {
+    fn watcher_stops_restarts_until_windows_insists() {
         let mut ui = sample();
         let mut session = Session::new(0, String::new());
         session.stopped.push("BITS".into());
         ui.session = Some(session);
-        let running = HashSet::from(["wuauserv".to_string(), "BITS".to_string()]);
-        // BITS, arrêté par Windows Update Stopper, tourne de nouveau : le minuteur l'arrête.
-        let plan = watch_plan(&ui, &running);
-        assert_eq!(plan, Some((vec!["BITS".to_string()], Vec::new())));
+        let running = |name: &str| name == "wuauserv" || name == "BITS";
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let bits = || vec!["BITS".to_string()];
+        // BITS, arrêté par l'appli, tourne de nouveau : le minuteur l'arrête aussitôt…
+        assert_eq!(watch_plan(&ui, running, at(0)), Some((bits(), Vec::new())));
         assert_eq!(
-            after_watch(&mut ui, vec!["BITS".into()], Vec::new()),
+            after_watch(&mut ui, bits(), Vec::new(), at(0), "14 h 40"),
             (true, false)
         );
-        // Revenu dès le tour suivant : Windows le relance aussitôt. Il est laissé tourner, et la
-        // session, sans plus rien à relancer, se termine.
-        let plan = watch_plan(&ui, &running);
-        assert_eq!(plan, Some((Vec::new(), vec!["BITS".to_string()])));
+        // … et le dit, en haut de la fenêtre et dans son détail.
         assert_eq!(
-            after_watch(&mut ui, Vec::new(), vec!["BITS".into()]),
+            last_restop(&ui).as_deref(),
+            Some("BITS relancé par Windows à 14 h 40 : arrêté de nouveau.")
+        );
+        let mut row = ui.rows[1].clone();
+        row.state = State::Stopped;
+        assert_eq!(
+            state_line(&ui, &row).0,
+            "Relancé par Windows à 14 h 40, arrêté de nouveau : « Relancer » le remet en marche."
+        );
+        // Encore en cours une seconde après la demande : il s'arrête, ce n'est pas une relance.
+        assert_eq!(
+            watch_plan(&ui, running, at(1)),
+            Some((Vec::new(), Vec::new()))
+        );
+        // Relancé encore deux fois : arrêté encore deux fois…
+        for seconds in [10, 20] {
+            assert_eq!(
+                watch_plan(&ui, running, at(seconds)),
+                Some((bits(), Vec::new()))
+            );
+            after_watch(&mut ui, bits(), Vec::new(), at(seconds), "14 h 41");
+        }
+        // … puis, arrêté trois fois en moins de 2 minutes, Windows insiste : BITS est laissé
+        // tourner, et la session, sans plus rien à relancer, se termine.
+        assert_eq!(watch_plan(&ui, running, at(30)), Some((Vec::new(), bits())));
+        assert_eq!(
+            after_watch(&mut ui, Vec::new(), bits(), at(30), "14 h 41"),
             (true, true)
         );
         assert!(ui.session.is_none() && ui.relaunched.contains("BITS"));
@@ -1965,13 +2134,44 @@ mod tests {
         assert!(status(&ui)
             .1
             .ends_with("≈ 30 Mo de plus (1 service coché en cours)."));
-        let plan = watch_plan(&ui, &running);
+        let plan = watch_plan(&ui, running, at(31));
         assert_eq!(plan, Some((vec!["wuauserv".to_string()], Vec::new())));
-        let bits = ui.rows[1].clone();
+        let bits_row = ui.rows[1].clone();
         assert_eq!(
-            state_line(&ui, &bits).0,
-            "Windows le relance aussitôt arrêté : un autre service s'en sert. \
-             Mieux vaut le décocher."
+            state_line(&ui, &bits_row).0,
+            "Windows le relance sans arrêt : l'appli le laisse tourner. Mieux vaut le décocher."
+        );
+    }
+
+    #[test]
+    fn watcher_keeps_stopping_what_windows_restarts_now_and_then() {
+        let mut ui = sample();
+        let mut session = Session::new(0, String::new());
+        session.game_mode = true;
+        ui.session = Some(session);
+        let start = Instant::now();
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        let update = || vec!["wuauserv".to_string()];
+        // Windows Update, coché, ne tournait pas au « Tout arrêter » ; Windows le démarre en pleine
+        // partie. La liste le voit : le minuteur n'attend pas son tour.
+        assert!(needs_watch(&ui, at(0)));
+        after_watch(&mut ui, update(), Vec::new(), at(0), "14 h 45");
+        assert_eq!(
+            last_restop(&ui).as_deref(),
+            Some("wuauserv démarré par Windows à 14 h 45 : arrêté aussitôt.")
+        );
+        // L'arrêt demandé, la liste qui le montre encore en cours ne relance pas le minuteur.
+        assert!(!needs_watch(&ui, at(1)));
+        // Relancé de temps en temps seulement : arrêté chaque fois, jamais laissé tourner.
+        for seconds in [100, 200, 300] {
+            let plan = watch_plan(&ui, |name| name == "wuauserv", at(seconds));
+            assert_eq!(plan, Some((update(), Vec::new())));
+            after_watch(&mut ui, update(), Vec::new(), at(seconds), "14 h 50");
+        }
+        assert!(ui.relaunched.is_empty());
+        assert_eq!(
+            last_restop(&ui).as_deref(),
+            Some("wuauserv relancé par Windows à 14 h 50 : arrêté de nouveau (4 en tout).")
         );
     }
 }
